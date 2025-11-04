@@ -19,6 +19,7 @@ from homeassistant.components.light import (
     ATTR_RGB_COLOR,
     ATTR_EFFECT,
     ATTR_RGBW_COLOR,
+    ATTR_COLOR_TEMP,
     LightEntity,
     ColorMode,
     LightEntityFeature,
@@ -206,40 +207,58 @@ class LeproLedLight(LightEntity):
         # store 25 segments internally; main light mirrors segment 0
         self._segment_colors = [(255, 255, 255)] * 25  # Default all white
         self._sensitivity = 50  # For music mode
+        self._color_temp = 370  # Default color temp in mireds (2700K)
+        
+        # Detect if this is a white-only bulb (B1) based on series or initial mode
+        series = device.get("series", "") or ""
+        self._is_white_only = "B1" in series or (self._mode == 0 and "d30" in device)
         
         # Initialize from device data
         if "d50" in device:
             self._parse_d50(device["d50"])
         if "d52" in device:
             self._brightness = self._map_device_brightness(device["d52"])
+        elif "d3" in device:
+            # B1 bulbs use d3 for brightness
+            self._brightness = self._map_device_brightness(device["d3"])
         else:
             self._brightness = 255
         if "d60" in device:
             self._sensitivity = self._parse_d60(device["d60"])
+        if "d30" in device:
+            self._parse_d30(device["d30"])
         
-        # Entity attributes
-        self._attr_supported_features = LightEntityFeature.EFFECT
-        self._attr_color_mode = ColorMode.RGB
-        self._attr_supported_color_modes = {ColorMode.RGB}
-        self._attr_effect_list = [
-            self.EFFECT_SOLID,
-            self.EFFECT_BREATH,
-            self.EFFECT_GRADIENT,
-            self.EFFECT_CLOCKWISE,
-            self.EFFECT_COUNTERCLOCKWISE,
-            self.EFFECT_CIRCULAR,
-            self.EFFECT_FLASH,
-            self.EFFECT_WAVE1,
-            self.EFFECT_WAVE2,
-            self.EFFECT_WAVE3,
-            self.EFFECT_WAVE4,
-            self.EFFECT_LASER1,
-            self.EFFECT_LASER2,
-            self.EFFECT_LASER3,
-            self.EFFECT_LASER4,
-        ]
-        # main light color is the first segment color
-        self._attr_rgb_color = self._segment_colors[0]  # First segment as primary color
+        # Entity attributes - set color mode based on device type
+        if self._is_white_only:
+            self._attr_supported_features = 0  # No effects for white bulbs
+            self._attr_color_mode = ColorMode.COLOR_TEMP
+            self._attr_supported_color_modes = {ColorMode.COLOR_TEMP}
+            self._attr_min_mireds = 153  # ~6500K (cool white)
+            self._attr_max_mireds = 370  # ~2700K (warm white)
+            self._attr_color_temp = self._color_temp
+        else:
+            self._attr_supported_features = LightEntityFeature.EFFECT
+            self._attr_color_mode = ColorMode.RGB
+            self._attr_supported_color_modes = {ColorMode.RGB}
+            self._attr_effect_list = [
+                self.EFFECT_SOLID,
+                self.EFFECT_BREATH,
+                self.EFFECT_GRADIENT,
+                self.EFFECT_CLOCKWISE,
+                self.EFFECT_COUNTERCLOCKWISE,
+                self.EFFECT_CIRCULAR,
+                self.EFFECT_FLASH,
+                self.EFFECT_WAVE1,
+                self.EFFECT_WAVE2,
+                self.EFFECT_WAVE3,
+                self.EFFECT_WAVE4,
+                self.EFFECT_LASER1,
+                self.EFFECT_LASER2,
+                self.EFFECT_LASER3,
+                self.EFFECT_LASER4,
+            ]
+            # main light color is the first segment color
+            self._attr_rgb_color = self._segment_colors[0]  # First segment as primary color
             
     def _map_device_brightness(self, device_brightness):
         """Map device brightness (100-1000) to HA brightness (0-255)"""
@@ -287,34 +306,88 @@ class LeproLedLight(LightEntity):
         except Exception:
             return 50, None
 
+    def _parse_d30(self, d30_str):
+        """
+        Parse d30 string for color temperature (B1 bulbs).
+        d30 format: 8-char hex string representing color temp
+        Examples from logs: '00000BA1' (warm), '00000C01', '00000C21'
+        
+        The value appears to be in the range:
+        - Lower values = warmer (2700K / 370 mireds)
+        - Higher values = cooler (6500K / 153 mireds)
+        """
+        try:
+            if not d30_str or len(d30_str) != 8:
+                return
+            
+            # Parse the hex value
+            temp_value = int(d30_str, 16)
+            
+            # Map the device value range to mireds
+            # Based on logs: 0x0BA1 (2977) to 0x0C21 (3105) observed
+            # Assuming range: 0x0BA1 (2700K warm) to ~0x1940 (6500K cool)
+            # Device range: ~2977 to ~6464
+            # Mireds range: 153 (6500K) to 370 (2700K)
+            
+            MIN_DEVICE_VALUE = 2977  # 0x0BA1 - warmest
+            MAX_DEVICE_VALUE = 6464  # ~0x1940 - coolest
+            
+            # Clamp value
+            temp_value = max(MIN_DEVICE_VALUE, min(MAX_DEVICE_VALUE, temp_value))
+            
+            # Map to mireds (inverse relationship: higher device value = cooler = lower mireds)
+            mireds = int(370 - ((temp_value - MIN_DEVICE_VALUE) * (370 - 153) / (MAX_DEVICE_VALUE - MIN_DEVICE_VALUE)))
+            
+            self._color_temp = mireds
+            self._attr_color_temp = mireds
+            
+        except Exception as e:
+            _LOGGER.error("Error parsing d30: %s", e)
+
 
     async def async_turn_on(self, **kwargs):
         """Turn on the light with optional parameters."""
-        # Determine new values from kwargs
-        brightness = kwargs.get(ATTR_BRIGHTNESS, self._brightness)
-        rgb_color = kwargs.get(ATTR_RGB_COLOR, self._attr_rgb_color)
-        effect = kwargs.get(ATTR_EFFECT, self._effect)
-        
-        # Update state optimistically
-        self._is_on = True
-        self._brightness = brightness
-        
-        # When color changes on the main light, set all segments to the same color
-        if ATTR_RGB_COLOR in kwargs:
-            self._attr_rgb_color = rgb_color
-            # set all segment colors to the main color
-            self._segment_colors = [tuple(int(c) for c in rgb_color)] * 25
-        
-        if ATTR_EFFECT in kwargs:
-            self._effect = effect
-        
-        # Send command based on effect
-        if effect in self.SPECIAL_EFFECTS:
-            # special effects use d2=3 (d60)
-            await self._send_special_effect_command(effect)
+        # Handle white-only bulbs (B1) differently
+        if self._is_white_only:
+            # B1 bulbs use d2=0 (white mode)
+            brightness = kwargs.get(ATTR_BRIGHTNESS, self._brightness)
+            color_temp = kwargs.get(ATTR_COLOR_TEMP, self._color_temp)
+            
+            # Update state optimistically
+            self._is_on = True
+            self._brightness = brightness
+            self._color_temp = color_temp
+            self._attr_color_temp = color_temp
+            
+            # Send white bulb command
+            await self._send_white_command()
         else:
-            # regular effects use d2=2 (d50)
-            await self._send_effect_command()
+            # RGB mode for LED strips
+            # Determine new values from kwargs
+            brightness = kwargs.get(ATTR_BRIGHTNESS, self._brightness)
+            rgb_color = kwargs.get(ATTR_RGB_COLOR, self._attr_rgb_color)
+            effect = kwargs.get(ATTR_EFFECT, self._effect)
+            
+            # Update state optimistically
+            self._is_on = True
+            self._brightness = brightness
+            
+            # When color changes on the main light, set all segments to the same color
+            if ATTR_RGB_COLOR in kwargs:
+                self._attr_rgb_color = rgb_color
+                # set all segment colors to the main color
+                self._segment_colors = [tuple(int(c) for c in rgb_color)] * 25
+            
+            if ATTR_EFFECT in kwargs:
+                self._effect = effect
+            
+            # Send command based on effect
+            if effect in self.SPECIAL_EFFECTS:
+                # special effects use d2=3 (d60)
+                await self._send_special_effect_command(effect)
+            else:
+                # regular effects use d2=2 (d50)
+                await self._send_effect_command()
 
         
         # update HA states: main + segments
@@ -346,6 +419,23 @@ class LeproLedLight(LightEntity):
             return "1000"
         raw = int(round(-117.41 * np.log(speed + 1) + 597.75))
         return f"0{raw:03X}"
+    
+    def _mireds_to_d30(self, mireds):
+        """
+        Convert mireds to d30 hex string for B1 bulbs.
+        Mireds range: 153 (6500K cool) to 370 (2700K warm)
+        Device range: ~6464 (cool) to ~2977 (warm)
+        """
+        MIN_DEVICE_VALUE = 2977  # 0x0BA1 - warmest (370 mireds / 2700K)
+        MAX_DEVICE_VALUE = 6464  # ~0x1940 - coolest (153 mireds / 6500K)
+        
+        # Clamp mireds to valid range
+        mireds = max(153, min(370, mireds))
+        
+        # Map mireds to device value (inverse relationship)
+        device_value = int(MIN_DEVICE_VALUE + ((370 - mireds) * (MAX_DEVICE_VALUE - MIN_DEVICE_VALUE) / (370 - 153)))
+        
+        return f"{device_value:08X}"
     
     def _generate_d50_string(self):
         """
@@ -540,6 +630,13 @@ class LeproLedLight(LightEntity):
     @property
     def effect(self):
         return self._effect
+    
+    @property
+    def color_temp(self):
+        """Return the color temperature in mireds."""
+        if self._is_white_only:
+            return self._color_temp
+        return None
 
     async def _send_special_effect_command(self, effect):
         """Send command for special (d2=3) effects using d60.
@@ -575,6 +672,18 @@ class LeproLedLight(LightEntity):
             _LOGGER.error("Failed to send special effect command %s: %s", effect, e)
 
 
+    async def _send_white_command(self):
+        """Send command for white-only bulbs (B1)"""
+        d30_value = self._mireds_to_d30(self._color_temp)
+        
+        payload = {
+            "d1": 1,
+            "d2": 0,  # White mode
+            "d30": d30_value,
+            "d3": self._map_ha_brightness(self._brightness)
+        }
+        await self._send_mqtt_command(payload)
+    
     async def _send_effect_command(self):
         """Send command for effect modes"""
         # Generate d50 string with current colors/groups
@@ -926,12 +1035,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
                 if 'd2' in data:
                     entity._mode = data['d2']
                 
-                # Update brightness
+                # Update brightness based on mode
                 if 'd52' in data:
+                    # RGB strips use d52
                     entity._brightness = entity._map_device_brightness(data['d52'])
                     entity._attr_brightness = entity._brightness
+                elif 'd3' in data:
+                    # B1 bulbs use d3
+                    entity._brightness = entity._map_device_brightness(data['d3'])
+                    entity._attr_brightness = entity._brightness
                 
-                # Update effect and colors
+                # Update color temperature for B1 bulbs
+                if 'd30' in data:
+                    entity._parse_d30(data['d30'])
+                
+                # Update effect and colors (for RGB strips)
                 if 'd50' in data:
                     entity._parse_d50(data['d50'])
                 
@@ -969,8 +1087,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
                 except Exception:
                     pass
 
-                _LOGGER.debug("Updated state for %s: on=%s, mode=%s, effect=%s, brightness=%s, speed=%s, rgb=%s, sensitivity=%s", 
-                             entity.name, entity._is_on, entity._mode, entity._effect, entity._brightness, entity._speed, entity._segment_colors[0], entity._sensitivity)
+                if entity._is_white_only:
+                    _LOGGER.debug("Updated state for B1 bulb %s: on=%s, mode=%s, brightness=%s, color_temp=%s", 
+                                 entity.name, entity._is_on, entity._mode, entity._brightness, entity._color_temp)
+                else:
+                    _LOGGER.debug("Updated state for %s: on=%s, mode=%s, effect=%s, brightness=%s, speed=%s, rgb=%s, sensitivity=%s", 
+                                 entity.name, entity._is_on, entity._mode, entity._effect, entity._brightness, entity._speed, entity._segment_colors[0], entity._sensitivity)
                     
         except Exception as e:
             _LOGGER.error("Error processing MQTT message: %s", e)
