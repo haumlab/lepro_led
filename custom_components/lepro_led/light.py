@@ -448,6 +448,9 @@ class LeproLedLight(LightEntity):
         # Map mireds to device value (inverse relationship)
         device_value = int(MIN_DEVICE_VALUE + ((370 - mireds) * (MAX_DEVICE_VALUE - MIN_DEVICE_VALUE) / (370 - 153)))
         
+        _LOGGER.info("Converting mireds %s to d30: device_value=%s, hex=%s", 
+                     mireds, device_value, f"{device_value:08X}")
+        
         return f"{device_value:08X}"
     
     def _generate_d50_string(self):
@@ -687,6 +690,9 @@ class LeproLedLight(LightEntity):
         """Send command for white-only bulbs (B1)"""
         d30_value = self._mireds_to_d30(self._color_temp)
         
+        _LOGGER.info("Sending white command - mireds: %s, d30: %s, brightness: %s", 
+                     self._color_temp, d30_value, self._brightness)
+        
         payload = {
             "d1": 1,
             "d2": 0,  # White mode
@@ -726,7 +732,7 @@ class LeproLedLight(LightEntity):
         }
         try:
             await self._mqtt_client.publish(topic, json.dumps(full_payload))
-            _LOGGER.debug("Sent MQTT command: %s - %s", topic, full_payload)
+            _LOGGER.info("Sent MQTT command: %s - %s", topic, full_payload)
         except Exception as e:
             _LOGGER.error("Failed to send MQTT command: %s", e)
             
