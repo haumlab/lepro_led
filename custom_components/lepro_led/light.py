@@ -360,7 +360,7 @@ class LeproLedLight(LightEntity):
             self._mode = 0  # White mode
             self._attr_color_mode = ColorMode.COLOR_TEMP
             
-            # Send white bulb command
+            # Send white bulb command with the new color temp
             await self._send_white_command()
             
         # Check if user wants to switch to RGB mode
@@ -372,6 +372,8 @@ class LeproLedLight(LightEntity):
             self._segment_colors = [tuple(int(c) for c in rgb_color)] * 25
             self._mode = 2  # RGB mode
             self._attr_color_mode = ColorMode.RGB
+            # Set effect to solid when switching to RGB mode
+            self._effect = self.EFFECT_SOLID
             
             # Send RGB command
             await self._send_effect_command()
