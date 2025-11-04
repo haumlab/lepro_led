@@ -309,9 +309,8 @@ class LeproLedLight(LightEntity):
         d30 format: 8-char hex string representing color temp
         Examples from logs: '00000BA1' (warm), '00000C01', '00000C21'
         
-        The value appears to be in the range:
-        - Lower values = warmer (2700K / 370 mireds)
-        - Higher values = cooler (6500K / 153 mireds)
+        Device range: 2977 (0x0BA1, 2700K warm) to 6464 (0x1940, 6500K cool)
+        Conversion: device_value → kelvin → mireds
         """
         try:
             if not d30_str or len(d30_str) != 8:
@@ -320,23 +319,25 @@ class LeproLedLight(LightEntity):
             # Parse the hex value
             temp_value = int(d30_str, 16)
             
-            # Map the device value range to mireds
-            # Based on logs: 0x0BA1 (2977) to 0x0C21 (3105) observed
-            # Assuming range: 0x0BA1 (2700K warm) to ~0x1940 (6500K cool)
-            # Device range: ~2977 to ~6464
-            # Mireds range: 153 (6500K) to 370 (2700K)
-            
-            MIN_DEVICE_VALUE = 2977  # 0x0BA1 - warmest
-            MAX_DEVICE_VALUE = 6464  # ~0x1940 - coolest
+            MIN_DEVICE_VALUE = 2977  # 0x0BA1 - warmest (2700K)
+            MAX_DEVICE_VALUE = 6464  # 0x1940 - coolest (6500K)
+            MIN_KELVIN = 2700
+            MAX_KELVIN = 6500
             
             # Clamp value
             temp_value = max(MIN_DEVICE_VALUE, min(MAX_DEVICE_VALUE, temp_value))
             
-            # Map to mireds (inverse relationship: higher device value = cooler = lower mireds)
-            mireds = int(370 - ((temp_value - MIN_DEVICE_VALUE) * (370 - 153) / (MAX_DEVICE_VALUE - MIN_DEVICE_VALUE)))
+            # Map device value to kelvin
+            kelvin = MIN_KELVIN + ((temp_value - MIN_DEVICE_VALUE) * (MAX_KELVIN - MIN_KELVIN) / (MAX_DEVICE_VALUE - MIN_DEVICE_VALUE))
+            
+            # Convert kelvin to mireds
+            mireds = int(1000000 / kelvin)
             
             self._color_temp = mireds
             self._attr_color_temp = mireds
+            
+            _LOGGER.debug("Parsed d30 %s: device_value=%s, kelvin=%dK, mireds=%s", 
+                         d30_str, temp_value, int(kelvin), mireds)
             
         except Exception as e:
             _LOGGER.error("Error parsing d30: %s", e)
@@ -437,19 +438,29 @@ class LeproLedLight(LightEntity):
         """
         Convert mireds to d30 hex string for B1 bulbs.
         Mireds range: 153 (6500K cool) to 370 (2700K warm)
-        Device range: ~6464 (cool) to ~2977 (warm)
+        Device range: 2977 (warm) to 6464 (cool)
+        
+        Conversion: mireds → kelvin → device_value
         """
-        MIN_DEVICE_VALUE = 2977  # 0x0BA1 - warmest (370 mireds / 2700K)
-        MAX_DEVICE_VALUE = 6464  # ~0x1940 - coolest (153 mireds / 6500K)
+        MIN_DEVICE_VALUE = 2977  # 0x0BA1 - warmest (2700K)
+        MAX_DEVICE_VALUE = 6464  # 0x1940 - coolest (6500K)
+        MIN_KELVIN = 2700
+        MAX_KELVIN = 6500
         
         # Clamp mireds to valid range
         mireds = max(153, min(370, mireds))
         
-        # Map mireds to device value (inverse relationship)
-        device_value = int(MIN_DEVICE_VALUE + ((370 - mireds) * (MAX_DEVICE_VALUE - MIN_DEVICE_VALUE) / (370 - 153)))
+        # Convert mireds to kelvin
+        kelvin = 1000000 / mireds
         
-        _LOGGER.info("Converting mireds %s to d30: device_value=%s, hex=%s", 
-                     mireds, device_value, f"{device_value:08X}")
+        # Clamp kelvin to valid range
+        kelvin = max(MIN_KELVIN, min(MAX_KELVIN, kelvin))
+        
+        # Map kelvin to device value
+        device_value = int(MIN_DEVICE_VALUE + ((kelvin - MIN_KELVIN) * (MAX_DEVICE_VALUE - MIN_DEVICE_VALUE) / (MAX_KELVIN - MIN_KELVIN)))
+        
+        _LOGGER.info("Converting mireds %s (=%dK) to d30: device_value=%s, hex=%s", 
+                     mireds, int(kelvin), device_value, f"{device_value:08X}")
         
         return f"{device_value:08X}"
     
