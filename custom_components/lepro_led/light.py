@@ -7,17 +7,15 @@ import random
 import ssl
 import os
 import hashlib
-import re
-import numpy as np
+import colorsys
 from .const import DOMAIN, LOGIN_URL, FAMILY_LIST_URL, USER_PROFILE_URL, DEVICE_LIST_URL
 from aiomqtt import Client, MqttError
 import aiofiles
-from homeassistant.core import callback
 
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_RGB_COLOR,
-    ATTR_EFFECT,
+    ATTR_COLOR_TEMP_KELVIN,
     LightEntity,
     ColorMode,
     LightEntityFeature,
@@ -29,6 +27,7 @@ from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
 
+# --- MQTT Wrapper (Unchanged) ---
 class MQTTClientWrapper:
     def __init__(self, hass, host, port, ssl_context, client_id):
         self.hass = hass
@@ -49,7 +48,8 @@ class MQTTClientWrapper:
                 port=self.port,
                 identifier=self.client_id,
                 tls_context=self.ssl_context,
-                clean_session=True
+                clean_session=True,
+                keepalive=10
             ) as client:
                 self.client = client
                 for topic in self._pending_subscriptions:
@@ -100,6 +100,7 @@ class MQTTClientWrapper:
             except asyncio.CancelledError:
                 pass
 
+# --- Login Helper (Unchanged) ---
 async def async_login(session, account, password, mac, language="it", fcm_token=""):
     timestamp = str(int(time.time()))
     payload = {
@@ -127,11 +128,8 @@ async def async_login(session, account, password, mac, language="it", fcm_token=
             return None
         return data.get("data", {}).get("token")
 
+# --- MAIN ENTITY CLASS (REDEVELOPED FOR B1) ---
 class LeproLedLight(LightEntity):
-    # B1 Bulb seems to use Strip Protocol (d50), so we treat it as a 1-segment strip.
-    
-    EFFECT_SOLID = "solid"
-    
     def __init__(self, device, mqtt_client, entry_id):
         self._device = device
         self._attr_unique_id = str(device["did"])
@@ -145,58 +143,77 @@ class LeproLedLight(LightEntity):
             "identifiers": {(DOMAIN, self._did)},
             "name": device["name"],
             "manufacturer": "Lepro",
-            "model": device.get("series", "Lepro B1 AI"),
+            "model": device.get("series", "Lepro B1"),
         }
         
-        # d1 = Switch (0/1)
+        # --- Internal State ---
+        # d1: 0=Off, 1=On
         self._is_on = bool(device.get("d1", 0))
-        # d2 = Mode (1=White/Static, 2=Dynamic/Scene)
-        self._mode = device.get("d2", 1)
+        # d2: 0=White, 1=Color, 2=Scene
+        self._mode = device.get("d2", 0)
         
-        # d52 = RGBIC Brightness (0-1000) - Not d3!
-        self._brightness = self._map_device_brightness(device.get("d52", 1000))
+        # d3: Brightness (10-1000)
+        self._brightness = self._map_lepro_to_ha(device.get("d3", 1000))
         
-        # d50 = RGBIC Data
+        # d4: Color Temp (0-1000, 0=2700K, 1000=6500K)
+        self._color_temp_kelvin = self._map_d4_to_kelvin(device.get("d4", 0))
+        
+        # d5: Color Hex String
         self._attr_rgb_color = (255, 255, 255)
-        if "d50" in device:
-            self._parse_d50(device["d50"])
+        if "d5" in device:
+            self._parse_d5(device["d5"])
             
-        self._attr_supported_features = LightEntityFeature.EFFECT
-        self._attr_color_mode = ColorMode.RGB
-        self._attr_supported_color_modes = {ColorMode.RGB}
-        self._attr_effect_list = [self.EFFECT_SOLID]
+        # --- Capabilities ---
+        self._attr_supported_color_modes = {ColorMode.RGB, ColorMode.COLOR_TEMP}
+        
+        # Determine current Color Mode for HA
+        if self._mode == 1:
+            self._attr_color_mode = ColorMode.RGB
+        else:
+            self._attr_color_mode = ColorMode.COLOR_TEMP
+            
+        self._attr_min_color_temp_kelvin = 2700
+        self._attr_max_color_temp_kelvin = 6500
 
-    def _map_device_brightness(self, device_brightness):
-        return int(device_brightness * 255 / 1000)
-    
-    def _map_ha_brightness(self, ha_brightness):
-        return int(ha_brightness * 1000 / 255)
+    # --- Helpers ---
+    def _map_ha_to_lepro(self, value):
+        """Map 0-255 (HA) to 10-1000 (Lepro)"""
+        if value is None: return 1000
+        return max(10, int(value * 1000 / 255))
 
-    def _parse_d50(self, d50_str):
-        """Parse d50 RGBIC String. Finds the first color and uses it."""
+    def _map_lepro_to_ha(self, value):
+        """Map 10-1000 (Lepro) to 0-255 (HA)"""
+        if value is None: return 255
+        return int(value * 255 / 1000)
+
+    def _map_kelvin_to_d4(self, kelvin):
+        """Map Kelvin (2700-6500) to d4 (0-1000)"""
+        # 2700K = 0, 6500K = 1000
+        percentage = (kelvin - 2700) / (6500 - 2700)
+        return max(0, min(1000, int(percentage * 1000)))
+
+    def _map_d4_to_kelvin(self, d4):
+        """Map d4 (0-1000) to Kelvin (2700-6500)"""
+        return int(2700 + (d4 / 1000.0) * (6500 - 2700))
+
+    def _parse_d5(self, hex_str):
+        """Parse d5: HHHHSSSSBBBB (12 hex chars)"""
         try:
-            # Regex to find the color Hex block after P1000...
-            # It usually looks like P10001[RRGGBB]...
-            match = re.search(r'P1000.*?([0-9A-F]{6})', d50_str)
-            if match:
-                hex_color = match.group(1)
-                r = int(hex_color[0:2], 16)
-                g = int(hex_color[2:4], 16)
-                b = int(hex_color[4:6], 16)
-                self._attr_rgb_color = (r, g, b)
-        except Exception as e:
-            _LOGGER.error(f"Error parsing d50: {e}")
+            if not hex_str or len(hex_str) < 12: return
+            h_int = int(hex_str[0:4], 16) # Hue 0-360
+            s_int = int(hex_str[4:8], 16) # Sat 0-1000
+            v_int = int(hex_str[8:12], 16) # Val 0-1000
+            
+            # Convert to RGB
+            h = h_int / 360.0
+            s = s_int / 1000.0
+            v = v_int / 1000.0
+            r, g, b = colorsys.hsv_to_rgb(h, s, v)
+            self._attr_rgb_color = (int(r*255), int(g*255), int(b*255))
+        except Exception:
+            pass
 
-    def _generate_d50(self, r, g, b):
-        """
-        Generates a d50 string for a single-segment bulb.
-        Format: N01:P1000{count}{COLOR}F21000{count}{length}U3V3...
-        We force it to 1 segment of the chosen color.
-        """
-        color_hex = f"{r:02X}{g:02X}{b:02X}"
-        # 1 Group, Color, 1 Group, Length 25 (Bulb often emulates 25 LEDs internally)
-        return f"N01:P10001{color_hex}F2100010019U3V3000640000E1;"
-
+    # --- Properties ---
     @property
     def is_on(self):
         return self._is_on
@@ -204,35 +221,79 @@ class LeproLedLight(LightEntity):
     @property
     def brightness(self):
         return self._brightness
+        
+    @property
+    def color_temp_kelvin(self):
+        return self._color_temp_kelvin
 
+    # --- Control ---
     async def async_turn_on(self, **kwargs):
         payload = {}
-        brightness = kwargs.get(ATTR_BRIGHTNESS, self._brightness)
-        
-        # 1. Power
         payload["d1"] = 1
-        payload["d30"] = "ha_cmd"
         self._is_on = True
         
-        # 2. Color / d50 Logic
+        # Brightness Handling
+        new_brightness = kwargs.get(ATTR_BRIGHTNESS, self._brightness)
+        self._brightness = new_brightness
+        
+        # 1. Color Change Requested (d2=1, d5=Hex)
         if ATTR_RGB_COLOR in kwargs:
-            r, g, b = kwargs[ATTR_RGB_COLOR]
-            self._attr_rgb_color = (r, g, b)
-            self._brightness = brightness
+            rgb = kwargs[ATTR_RGB_COLOR]
+            self._attr_rgb_color = rgb
             
-            payload["d2"] = 1 # Static/White Mode
-            payload["d50"] = self._generate_d50(r, g, b)
-            payload["d52"] = self._map_ha_brightness(brightness)
+            # Convert RGB -> HSV
+            r, g, b = rgb
+            h, s, v = colorsys.rgb_to_hsv(r/255.0, g/255.0, b/255.0)
             
+            # Note: For Color mode, Brightness is part of d5 string (the V component)
+            # If ATTR_BRIGHTNESS was sent, override V
+            if ATTR_BRIGHTNESS in kwargs:
+                v = new_brightness / 255.0
+            
+            h_val = int(h * 360)
+            s_val = int(s * 1000)
+            v_val = int(v * 1000)
+            
+            d5_hex = f"{h_val:04X}{s_val:04X}{v_val:04X}"
+            
+            payload["d2"] = 1 # Color Mode
+            payload["d5"] = d5_hex
+            self._attr_color_mode = ColorMode.RGB
+
+        # 2. Color Temp Change Requested (d2=0, d3=Bright, d4=Temp)
+        elif ATTR_COLOR_TEMP_KELVIN in kwargs:
+            kelvin = kwargs[ATTR_COLOR_TEMP_KELVIN]
+            self._color_temp_kelvin = kelvin
+            
+            d3_val = self._map_ha_to_lepro(new_brightness)
+            d4_val = self._map_kelvin_to_d4(kelvin)
+            
+            payload["d2"] = 0 # White Mode
+            payload["d3"] = d3_val
+            payload["d4"] = d4_val
+            self._attr_color_mode = ColorMode.COLOR_TEMP
+
+        # 3. Only Brightness Changed
         elif ATTR_BRIGHTNESS in kwargs:
-            self._brightness = brightness
-            payload["d52"] = self._map_ha_brightness(brightness)
+            if self._mode == 1: # Current Color Mode
+                # We need to re-send d5 with updated V component
+                r, g, b = self._attr_rgb_color
+                h, s, _ = colorsys.rgb_to_hsv(r/255.0, g/255.0, b/255.0)
+                v = new_brightness / 255.0
+                
+                h_val = int(h * 360)
+                s_val = int(s * 1000)
+                v_val = int(v * 1000)
+                d5_hex = f"{h_val:04X}{s_val:04X}{v_val:04X}"
+                payload["d5"] = d5_hex
+            else: # Current White Mode
+                payload["d3"] = self._map_ha_to_lepro(new_brightness)
 
         await self._send_mqtt_command(payload)
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs):
-        payload = {"d1": 0, "d30": "ha_cmd"}
+        payload = {"d1": 0}
         await self._send_mqtt_command(payload)
         self._is_on = False
         self.async_write_ha_state()
@@ -241,27 +302,26 @@ class LeproLedLight(LightEntity):
         topic = f"le/{self._did}/prp/set"
         full_payload = {
             "id": random.randint(0, 1000000000),
-            "t": int(time.time()),
             "d": payload
         }
         try:
             await self._mqtt_client.publish(topic, json.dumps(full_payload))
         except Exception as e:
-            _LOGGER.error("Failed to send MQTT command: %s", e)
+            _LOGGER.error("Failed to send: %s", e)
             
     async def async_added_to_hass(self):
         await super().async_added_to_hass()
-        # Request state. Note: requesting d50 and d52 specifically for B1 AI.
-        payload = json.dumps({"d": ["d1", "d2", "d50", "d52", "d30", "online"]})
+        # Request full status according to doc
         try:
-            await self._mqtt_client.publish(f"le/{self._did}/prp/get", payload)
+            payload = json.dumps({"d": ["d1", "d2", "d3", "d4", "d5", "online"]})
+            await self._mqtt_client.publish(f"le/{self._did}/prp/dsr/app/get", payload)
         except Exception:
             pass
 
+# --- Cert Helpers ---
 async def download_cert_file(session, url, path, headers):
     async with session.get(url, headers=headers) as resp:
-        if resp.status != 200:
-            return
+        if resp.status != 200: return
         data = await resp.read()
         async with aiofiles.open(path, 'wb') as f:
             await f.write(data)
@@ -269,17 +329,18 @@ async def download_cert_file(session, url, path, headers):
 def create_ssl_context(root_ca_path, client_cert_path, keyfile_path):
     context = ssl.create_default_context()
     context.load_verify_locations(cafile=root_ca_path)
-    # If manual key exists, use it. If not, try using cert path for both (combined file).
+    # Use manual key file if provided, otherwise assume cert contains key
     try:
         context.load_cert_chain(certfile=client_cert_path, keyfile=keyfile_path)
     except:
         context.load_cert_chain(certfile=client_cert_path, keyfile=client_cert_path)
     return context
 
+# --- Setup Entry ---
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback):
     config = hass.data["lepro_led"][entry.entry_id]
     
-    # Manual key file support
+    # Files
     keyfile_path = os.path.join(os.path.dirname(__file__), "client_key.pem")
     cert_dir = os.path.join(hass.config.config_dir, ".lepro_led")
     if not os.path.exists(cert_dir):
@@ -288,10 +349,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     root_ca_path = os.path.join(cert_dir, f"{entry.entry_id}_root_ca.pem")
     client_cert_path = os.path.join(cert_dir, f"{entry.entry_id}_client_cert.pem")
 
+    # API Login / Downloads
     async with aiohttp.ClientSession() as session:
         bearer_token = await async_login(session, config["account"], config["password"], config["persistent_mac"])
-        if not bearer_token:
-            return
+        if not bearer_token: return
 
         headers = {
             "Authorization": f"Bearer {bearer_token}",
@@ -309,9 +370,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         try:
             await download_cert_file(session, mqtt_info["root"], root_ca_path, headers)
             await download_cert_file(session, mqtt_info["cert"], client_cert_path, headers)
-        except Exception:
-            pass
+        except Exception: pass
 
+        # Get Devices
         family_url = FAMILY_LIST_URL.format(timestamp=str(int(time.time())))
         async with session.get(family_url, headers=headers) as resp:
             family_data = await resp.json()
@@ -322,21 +383,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             device_data = await resp.json()
             devices = device_data.get("data", {}).get("list", [])
 
+    # MQTT Connect
     try:
         ssl_context = await hass.async_add_executor_job(
             create_ssl_context, root_ca_path, client_cert_path, keyfile_path
         )
-    except Exception:
-        return
+    except Exception: return
 
     client_id = f"lepro-app-{hashlib.sha256(entry.entry_id.encode()).hexdigest()[:32]}"
     mqtt_client = MQTTClientWrapper(hass, mqtt_info["host"], int(mqtt_info["port"]), ssl_context, client_id)
     
     try:
         await mqtt_client.connect()
-    except Exception:
-        return
+    except Exception: return
     
+    # Entity Creation
     entities = []
     device_entity_map = {}
     for device in devices:
@@ -344,19 +405,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         entities.append(entity)
         device_entity_map[str(device['did'])] = entity
 
+    # Handler: Update State from MQTT
     async def handle_mqtt_message(message):
         try:
             payload = json.loads(message.payload.decode())
             did = message.topic.value.split('/')[1]
             entity = device_entity_map.get(did)
+            
             if entity:
                 data = payload.get('d', {})
                 if 'd1' in data: entity._is_on = bool(data['d1'])
-                if 'd52' in data: entity._brightness = entity._map_device_brightness(data['d52'])
-                if 'd50' in data: entity._parse_d50(data['d50'])
+                if 'd2' in data: entity._mode = data['d2']
+                if 'd3' in data: entity._brightness = entity._map_lepro_to_ha(data['d3'])
+                if 'd4' in data: entity._color_temp_kelvin = entity._map_d4_to_kelvin(data['d4'])
+                if 'd5' in data: entity._parse_d5(data['d5'])
+                
+                # Update HA mode based on d2
+                if entity._mode == 1:
+                    entity._attr_color_mode = ColorMode.RGB
+                else:
+                    entity._attr_color_mode = ColorMode.COLOR_TEMP
+                    
                 entity.async_write_ha_state()
-        except Exception:
-            pass
+        except Exception: pass
    
     mqtt_client.set_message_callback(handle_mqtt_message)
     for did in device_entity_map.keys():
