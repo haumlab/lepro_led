@@ -7,9 +7,8 @@ import random
 import ssl
 import os
 import hashlib
-import re
-import numpy as np
-from .const import DOMAIN, LOGIN_URL, FAMILY_LIST_URL, USER_PROFILE_URL, DEVICE_LIST_URL, SWITCH_API_URL
+import colorsys
+from .const import DOMAIN, LOGIN_URL, FAMILY_LIST_URL, USER_PROFILE_URL, DEVICE_LIST_URL
 from aiomqtt import Client, MqttError
 import aiofiles
 from homeassistant.core import callback
@@ -17,9 +16,6 @@ from homeassistant.core import callback
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_RGB_COLOR,
-    ATTR_EFFECT,
-    ATTR_RGBW_COLOR,
-    ATTR_COLOR_TEMP,
     LightEntity,
     ColorMode,
     LightEntityFeature,
@@ -137,7 +133,6 @@ async def async_login(session, account, password, mac, language="it", fcm_token=
     }
 
     async with session.post(LOGIN_URL, json=payload, headers=headers) as resp:
-        import json
         if resp.status != 200:
             _LOGGER.error("Login failed with status %s", resp.status)
             return None
@@ -150,501 +145,69 @@ async def async_login(session, account, password, mac, language="it", fcm_token=
 
 
 class LeproLedLight(LightEntity):
-    # Effect constants
-    EFFECT_SOLID = "solid"
-    EFFECT_BREATH = "breath"
-    EFFECT_GRADIENT = "gradient"
-    EFFECT_CLOCKWISE = "clockwise"
-    EFFECT_COUNTERCLOCKWISE = "counterclockwise"
-    EFFECT_CIRCULAR = "circular"
-    EFFECT_FLASH = "flash"
-    EFFECT_WAVE1 = "wave_1"
-    EFFECT_WAVE2 = "wave_2"
-    EFFECT_WAVE3 = "wave_3"
-    EFFECT_WAVE4 = "wave_4"
-    EFFECT_LASER1 = "laser_1"
-    EFFECT_LASER2 = "laser_2"
-    EFFECT_LASER3 = "laser_3"
-    EFFECT_LASER4 = "laser_4"
-
-    # Mapping effect -> d60 7-char prefix (first 7 digits)
-    SPECIAL_EFFECT_TO_D60_PREFIX = {
-        EFFECT_FLASH: "2000064",
-        EFFECT_WAVE1: "2010064",
-        EFFECT_WAVE2: "2020064",
-        EFFECT_WAVE3: "2030064",
-        EFFECT_WAVE4: "2040064",
-        EFFECT_LASER1: "2050064",
-        EFFECT_LASER2: "2060064",
-        EFFECT_LASER3: "2070064",
-        EFFECT_LASER4: "2080064",
-    }
-
-    # Set of special effects for quick checks
-    SPECIAL_EFFECTS = set(SPECIAL_EFFECT_TO_D60_PREFIX.keys())
-    
     def __init__(self, device, mqtt_client, entry_id):
         self._device = device
-        # self._attr_name = device["name"]
         self._attr_unique_id = str(device["did"])
         self._fid = device["fid"]
         self._mqtt_client = mqtt_client
         self._entry_id = entry_id
         self._did = str(device["did"])
         self._attr_has_entity_name = True
-        self._attr_translation_key = "strip"
+        self._attr_translation_key = "bulb"
         self._attr_device_info = {
             "identifiers": {(DOMAIN, self._did)},
             "name": device["name"],
             "manufacturer": "Lepro",
-            "model": device.get("series", "Lepro LED"),
-        }        
-        # State variables
-        self._is_on = bool(device.get("switch", 0))
-        self._mode = device.get("d2", 2)  # Default to static mode
-        self._effect = self.EFFECT_SOLID
-        self._speed = 50  # Default speed (0-100)
-        # store 25 segments internally; main light mirrors segment 0
-        self._segment_colors = [(255, 255, 255)] * 25  # Default all white
-        self._sensitivity = 50  # For music mode
-        self._color_temp = 370  # Default color temp in mireds (2700K)
+            "model": device.get("series", "Lepro B1"),
+        }
         
-        # B1 bulbs are RGB bulbs that also support white mode (d2=0)
-        # Don't mark them as white-only
-        series = device.get("series", "") or ""
-        self._is_white_only = False
+        # Initialize state
+        # d1 is 0/1 for On/Off
+        self._is_on = bool(device.get("d1", 0))
         
-        # Initialize from device data
-        if "d50" in device:
-            self._parse_d50(device["d50"])
-        if "d52" in device:
-            self._brightness = self._map_device_brightness(device["d52"])
-        elif "d3" in device:
-            # B1 bulbs use d3 for brightness
-            self._brightness = self._map_device_brightness(device["d3"])
-        else:
-            self._brightness = 255
-        if "d60" in device:
-            self._sensitivity = self._parse_d60(device["d60"])
-        if "d30" in device:
-            self._parse_d30(device["d30"])
+        # d2 is Work Mode (1=White, 2=Color, 3=Scene)
+        self._mode = device.get("d2", 1) 
         
-        # Entity attributes - support both RGB and color temp
-        self._attr_supported_features = LightEntityFeature.EFFECT
-        # Start with RGB mode, but support both RGB and color temp
-        self._attr_color_mode = ColorMode.RGB if self._mode == 2 else ColorMode.COLOR_TEMP
-        self._attr_supported_color_modes = {ColorMode.RGB, ColorMode.COLOR_TEMP}
-        self._attr_min_mireds = 153  # ~6500K (cool white)
-        self._attr_max_mireds = 370  # ~2700K (warm white)
-        self._attr_effect_list = [
-            self.EFFECT_SOLID,
-            self.EFFECT_BREATH,
-            self.EFFECT_GRADIENT,
-            self.EFFECT_CLOCKWISE,
-            self.EFFECT_COUNTERCLOCKWISE,
-            self.EFFECT_CIRCULAR,
-            self.EFFECT_FLASH,
-            self.EFFECT_WAVE1,
-            self.EFFECT_WAVE2,
-            self.EFFECT_WAVE3,
-            self.EFFECT_WAVE4,
-            self.EFFECT_LASER1,
-            self.EFFECT_LASER2,
-            self.EFFECT_LASER3,
-            self.EFFECT_LASER4,
-        ]
-        # main light color is the first segment color
-        self._attr_rgb_color = self._segment_colors[0]  # First segment as primary color
-        self._attr_color_temp = self._color_temp
-            
+        # d3 is White Brightness (0-1000)
+        self._brightness = self._map_device_brightness(device.get("d3", 1000))
+        
+        # d5 is Color Data (Hex String)
+        self._attr_rgb_color = (255, 255, 255)
+        if "d5" in device:
+            self._parse_d5(device["d5"])
+        
+        self._attr_supported_color_modes = {ColorMode.RGB}
+        self._attr_color_mode = ColorMode.RGB
+
     def _map_device_brightness(self, device_brightness):
-        """Map device brightness (100-1000) to HA brightness (0-255)"""
-        _LOGGER.info("device_brightness: %s", str(device_brightness))
-        # return int((device_brightness - 100) * 255 / 900)
-        return int((device_brightness - 0) * 255 / 1000)
+        """Map device brightness (0-1000) to HA brightness (0-255)"""
+        return int(device_brightness * 255 / 1000)
     
     def _map_ha_brightness(self, ha_brightness):
-        """Map HA brightness (0-255) to device brightness (100-1000)"""
-        # return 100 + int(ha_brightness * 900 / 255)
-        return 0 + int(ha_brightness * 1000 / 255)
-    
-    def _parse_d60(self, d60_str):
-        """
-        Parse d60 string for special-effects and sensitivity.
-        Expected d60: <7-char-effect-prefix><2-hex-sensitivity><0000>
-        Example: "2000064320000" -> prefix "2000064", sens_hex "32" -> sens_percent ~51
+        """Map HA brightness (0-255) to device brightness (0-1000)"""
+        return int(ha_brightness * 1000 / 255)
 
-        Returns: (sensitivity_percent_int, effect_name_or_None)
+    def _parse_d5(self, hex_str):
+        """
+        Parse d5 Hex String from AIotUtils.java
+        Format: HHHHSSSSVVVV (Hue 0-360, Sat 0-1000, Val 0-1000)
         """
         try:
-            if not d60_str or len(d60_str) < 9:
-                return 50, None
-
-            prefix = d60_str[0:7]
-            sens_hex = d60_str[7:9]
-
-            # parse hex sensitivity (0x00 .. 0x63)
-            try:
-                sens_val = int(sens_hex, 16)
-            except Exception:
-                sens_val = 0x00
-
-            # Map sens_val (0..0x63) -> percent 0..100
-            MAX_HEX = 0x63  # 99 decimal; spec: 100 -> 0x63
-            sens_percent = round(sens_val * 100 / MAX_HEX) if MAX_HEX > 0 else 0
-            # clamp
-            sens_percent = max(0, min(100, int(sens_percent)))
-
-            # map prefix to effect
-            prefix_map = {v: k for k, v in self.SPECIAL_EFFECT_TO_D60_PREFIX.items()}
-            effect = prefix_map.get(prefix)
-
-            return sens_percent, effect
-        except Exception:
-            return 50, None
-
-    def _parse_d30(self, d30_str):
-        """
-        Parse d30 string for color temperature (B1 bulbs).
-        d30 format: 8-char hex string representing color temp
-        Examples from logs: '00000BA1' (warm), '00000C01', '00000C21'
-        
-        Device range: 2977 (0x0BA1, 2700K warm) to 6464 (0x1940, 6500K cool)
-        Conversion: device_value → kelvin → mireds
-        """
-        try:
-            if not d30_str or len(d30_str) != 8:
+            if len(hex_str) < 12:
                 return
+            h_int = int(hex_str[0:4], 16)
+            s_int = int(hex_str[4:8], 16)
+            v_int = int(hex_str[8:12], 16)
             
-            # Parse the hex value
-            temp_value = int(d30_str, 16)
-            
-            MIN_DEVICE_VALUE = 2977  # 0x0BA1 - warmest (2700K)
-            MAX_DEVICE_VALUE = 6464  # 0x1940 - coolest (6500K)
-            MIN_KELVIN = 2700
-            MAX_KELVIN = 6500
-            
-            # Clamp value
-            temp_value = max(MIN_DEVICE_VALUE, min(MAX_DEVICE_VALUE, temp_value))
-            
-            # Map device value to kelvin
-            kelvin = MIN_KELVIN + ((temp_value - MIN_DEVICE_VALUE) * (MAX_KELVIN - MIN_KELVIN) / (MAX_DEVICE_VALUE - MIN_DEVICE_VALUE))
-            
-            # Convert kelvin to mireds
-            mireds = int(1000000 / kelvin)
-            
-            self._color_temp = mireds
-            self._attr_color_temp = mireds
-            
-            _LOGGER.debug("Parsed d30 %s: device_value=%s, kelvin=%dK, mireds=%s", 
-                         d30_str, temp_value, int(kelvin), mireds)
-            
+            # Convert to HA RGB (0-255)
+            # HSV to RGB
+            h = h_int / 360.0
+            s = s_int / 1000.0
+            v = v_int / 1000.0
+            r, g, b = colorsys.hsv_to_rgb(h, s, v)
+            self._attr_rgb_color = (int(r * 255), int(g * 255), int(b * 255))
         except Exception as e:
-            _LOGGER.error("Error parsing d30: %s", e)
-
-
-    async def async_turn_on(self, **kwargs):
-        """Turn on the light with optional parameters."""
-        brightness = kwargs.get(ATTR_BRIGHTNESS, self._brightness)
-        
-        # Update state optimistically
-        self._is_on = True
-        self._brightness = brightness
-        self._attr_brightness = brightness
-        
-        # Check if user wants to switch to color temp mode
-        if ATTR_COLOR_TEMP in kwargs:
-            # Switch to white/color temp mode (d2=0)
-            color_temp = kwargs[ATTR_COLOR_TEMP]
-            self._color_temp = color_temp
-            self._attr_color_temp = color_temp
-            self._mode = 0  # White mode
-            self._attr_color_mode = ColorMode.COLOR_TEMP
-            
-            # Send white bulb command with the new color temp
-            await self._send_white_command()
-            
-        # Check if user wants to switch to RGB mode
-        elif ATTR_RGB_COLOR in kwargs:
-            # Switch to RGB mode (d2=2)
-            rgb_color = kwargs[ATTR_RGB_COLOR]
-            self._attr_rgb_color = rgb_color
-            # set all segment colors to the main color
-            self._segment_colors = [tuple(int(c) for c in rgb_color)] * 25
-            self._mode = 2  # RGB mode
-            self._attr_color_mode = ColorMode.RGB
-            # Set effect to solid when switching to RGB mode
-            self._effect = self.EFFECT_SOLID
-            
-            # Send RGB command
-            await self._send_effect_command()
-            
-        # Effect change (stays in current mode)
-        elif ATTR_EFFECT in kwargs:
-            effect = kwargs[ATTR_EFFECT]
-            self._effect = effect
-            
-            # Send command based on effect
-            if effect in self.SPECIAL_EFFECTS:
-                # special effects use d2=3 (d60)
-                await self._send_special_effect_command(effect)
-            else:
-                # regular effects use d2=2 (d50)
-                await self._send_effect_command()
-                
-        # Just brightness change - maintain current mode
-        else:
-            if self._mode == 0:
-                # In white mode, update brightness via d3
-                await self._send_white_command()
-            else:
-                # In RGB mode, update brightness via d52
-                if self._effect in self.SPECIAL_EFFECTS:
-                    await self._send_special_effect_command(self._effect)
-                else:
-                    await self._send_effect_command()
-        
-        # update HA states: main + segments
-        self.async_write_ha_state()
-        # update segment entities attached to this device if present
-        try:
-            segments = self.hass.data[DOMAIN][self._entry_id].get('segments', {}).get(self._did, [])
-            for seg in segments:
-                try:
-                    seg.async_write_ha_state()
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-
-    def _hex_to_speed(self, hex_str):
-        """Convert 4-digit hex speed value to percentage (0-100)"""
-        code = hex_str.upper()
-        if code == "1000":
-            return 0.0
-        raw = int(code[1:], 16)
-        percent = np.exp((raw - 597.75) / -117.41) - 1
-        return float(max(0, min(100, percent)))
-
-    def _speed_to_hex(self, speed):
-        """Convert percentage (0-100) to 4-digit hex speed value"""
-        if speed <= 0:
-            return "1000"
-        raw = int(round(-117.41 * np.log(speed + 1) + 597.75))
-        return f"0{raw:03X}"
-    
-    def _mireds_to_d30(self, mireds):
-        """
-        Convert mireds to d30 hex string for B1 bulbs.
-        Mireds range: 153 (6500K cool) to 370 (2700K warm)
-        Device range: 2977 (warm) to 6464 (cool)
-        
-        Conversion: mireds → kelvin → device_value
-        """
-        MIN_DEVICE_VALUE = 2977  # 0x0BA1 - warmest (2700K)
-        MAX_DEVICE_VALUE = 6464  # 0x1940 - coolest (6500K)
-        MIN_KELVIN = 2700
-        MAX_KELVIN = 6500
-        
-        # Clamp mireds to valid range
-        mireds = max(153, min(370, mireds))
-        
-        # Convert mireds to kelvin
-        kelvin = 1000000 / mireds
-        
-        # Clamp kelvin to valid range
-        kelvin = max(MIN_KELVIN, min(MAX_KELVIN, kelvin))
-        
-        # Map kelvin to device value
-        device_value = int(MIN_DEVICE_VALUE + ((kelvin - MIN_KELVIN) * (MAX_DEVICE_VALUE - MIN_DEVICE_VALUE) / (MAX_KELVIN - MIN_KELVIN)))
-        
-        _LOGGER.info("Converting mireds %s (=%dK) to d30: device_value=%s, hex=%s", 
-                     mireds, int(kelvin), device_value, f"{device_value:08X}")
-        
-        return f"{device_value:08X}"
-    
-    def _generate_d50_string(self):
-        """
-        Generate d50 string following the grouped-color format:
-        N01:P1000{num_groups}{colors}{F21000}{num_groups}{lengths}U3V3{effect};
-        - colors: each 6 hex (RGB)
-        - lengths: each 4 hex representing number of segments in that group (hex)
-        """
-        # compress contiguous segment colors into groups
-        groups = []
-        for col in self._segment_colors:
-            if not groups:
-                groups.append([col, 1])
-            else:
-                if col == groups[-1][0]:
-                    groups[-1][1] += 1
-                else:
-                    groups.append([col, 1])
-
-        # normalize/truncate/extend to ensure 25 segments
-        total = sum(g[1] for g in groups)
-        if total != 25:
-            if total < 25:
-                groups[-1][1] += (25 - total)
-            else:
-                while sum(g[1] for g in groups) > 25:
-                    excess = sum(g[1] for g in groups) - 25
-                    if groups[-1][1] > excess:
-                        groups[-1][1] -= excess
-                    else:
-                        groups.pop()
-
-        num_groups = len(groups)
-
-        # build colors string (each color 6 hex)
-        colors_parts = []
-        for (r, g, b), cnt in groups:
-            colors_parts.append(f"{int(r):02X}{int(g):02X}{int(b):02X}")
-        colors_str = ''.join(colors_parts)
-
-        # build lengths string (each as 4-hex uppercase)
-        lengths_parts = []
-        for (_, count) in groups:
-            lengths_parts.append(f"{count:04X}")
-        lengths_str = ''.join(lengths_parts)
-
-        # build effect tail (reuse your existing logic)
-        effect = ""
-        if self._effect == self.EFFECT_SOLID:  # Solid effect
-            effect = "000640000E1"
-        elif self._effect == self.EFFECT_BREATH:  # Breath effect
-            effect = "000640000E4" + self._speed_to_hex(self._speed) + "0000" + self._speed_to_hex(self._speed) + "1664"
-        elif self._effect == self.EFFECT_GRADIENT:  # Gradient
-            effect = "100640000E3" + self._speed_to_hex(self._speed) + "C2O6" + self._speed_to_hex(self._speed)
-        elif self._effect == self.EFFECT_CLOCKWISE:  # Clockwise
-            effect = "00164" + self._speed_to_hex(self._speed) + "E1"
-        elif self._effect == self.EFFECT_COUNTERCLOCKWISE:  # Counterclockwise
-            effect = "00264" + self._speed_to_hex(self._speed) + "E1"
-        elif self._effect == self.EFFECT_CIRCULAR:  # Circular
-            effect = "100640000E1" + "C2O6" + self._speed_to_hex(self._speed)
-
-        # Compose the grouped d50
-        d50 = f"N01:P1000{num_groups}{colors_str}F21000{num_groups}{lengths_str}U3V3{effect};"
-        return d50
-
-
-    def _parse_d50(self, d50_str):
-        """Parse grouped d50 string for effect and segment colours and primary color"""
-        try:
-            # Reset to defaults
-            self._effect = self.EFFECT_SOLID
-            self._speed = 50
-
-            # Find P1000 block and F21000 marker
-            p_idx = d50_str.find('P1000')
-            if p_idx == -1:
-                # fallback: try single-color old format
-                match = re.search(r'P10001([0-9A-F]{6})', d50_str)
-                if match:
-                    hex_color = match.group(1)
-                    r = int(hex_color[0:2], 16)
-                    g = int(hex_color[2:4], 16)
-                    b = int(hex_color[4:6], 16)
-                    self._segment_colors = [(r, g, b)] * 25
-                    self._attr_rgb_color = (r, g, b)
-                # continue to parse effect below
-            else:
-                f_idx = d50_str.find('F21000', p_idx)
-                if f_idx == -1:
-                    raise ValueError("Missing F21000 after P1000 block")
-
-                # block contains ascii num_groups + colors_hex
-                block = d50_str[p_idx + len('P1000') : f_idx]
-
-                # we must determine how many ASCII digits form num_groups (k)
-                num_groups = None
-                k_used = None
-                for k in range(1, 4):  # try 1..3 digits for safety
-                    if len(block) >= k and block[:k].isdigit():
-                        candidate = int(block[:k])
-                        if len(block) - k == 6 * candidate:
-                            num_groups = candidate
-                            k_used = k
-                            break
-
-                if num_groups is None:
-                    raise ValueError("Could not deduce num_groups / colors length from d50")
-
-                colors_hex = block[k_used:]
-                colors = [colors_hex[i*6:(i+1)*6] for i in range(num_groups)]
-                colors_rgb = [(int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)) for c in colors]
-
-                # read second num_groups with the same digit-length k_used
-                num_groups2_str = d50_str[f_idx + 6 : f_idx + 6 + k_used]
-                num_groups2 = int(num_groups2_str) if num_groups2_str.isdigit() else None
-
-                # read lengths: next num_groups * 4 hex chars
-                lengths_hex = d50_str[f_idx + 6 + k_used : f_idx + 6 + k_used + num_groups * 4]
-                if len(lengths_hex) < num_groups * 4:
-                    raise ValueError("Not enough length hex data in d50")
-
-                lengths = [int(lengths_hex[i*4:(i+1)*4], 16) for i in range(num_groups)]
-
-                # expand to 25 segments
-                segs = []
-                for (col, cnt) in zip(colors_rgb, lengths):
-                    segs.extend([col] * cnt)
-
-                # normalize to 25 segments
-                if len(segs) < 25:
-                    if segs:
-                        segs.extend([segs[-1]] * (25 - len(segs)))
-                    else:
-                        segs = [(255,255,255)] * 25
-                elif len(segs) > 25:
-                    segs = segs[:25]
-
-                self._segment_colors = segs
-                self._attr_rgb_color = self._segment_colors[0]
-
-            # Parse effect and speed as before
-            if "000640000E1" in d50_str:
-                self._effect = self.EFFECT_SOLID
-            elif breath_match := re.search(r'000640000E4([0-9A-F]{4})0000[0-9A-F]{4}1664', d50_str):
-                self._effect = self.EFFECT_BREATH
-                speed_hex = breath_match.group(1)
-                self._speed = self._hex_to_speed(speed_hex)
-            elif gradient_match := re.search(r'100640000E3([0-9A-F]{4})C2O6[0-9A-F]{4}', d50_str):
-                self._effect = self.EFFECT_GRADIENT
-                speed_hex = gradient_match.group(1)
-                self._speed = self._hex_to_speed(speed_hex)
-            elif clockwise_match := re.search(r'00164([0-9A-F]{4})E1', d50_str):
-                self._effect = self.EFFECT_CLOCKWISE
-                speed_hex = clockwise_match.group(1)
-                self._speed = self._hex_to_speed(speed_hex)
-            elif counter_match := re.search(r'00264([0-9A-F]{4})E1', d50_str):
-                self._effect = self.EFFECT_COUNTERCLOCKWISE
-                speed_hex = counter_match.group(1)
-                self._speed = self._hex_to_speed(speed_hex)
-            elif circular_match := re.search(r'100640000E1C2O6([0-9A-F]{4})', d50_str):
-                self._effect = self.EFFECT_CIRCULAR
-                speed_hex = circular_match.group(1)
-                self._speed = self._hex_to_speed(speed_hex)
-
-            # Update segment entities if present
-            try:
-                segments = self.hass.data[DOMAIN][self._entry_id].get('segments', {}).get(self._did, [])
-                for seg in segments:
-                    try:
-                        seg.async_write_ha_state()
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-        except Exception as e:
-            _LOGGER.error("Error parsing d50: %s", e)
-            # fallback
-            self._segment_colors = [(255, 255, 255)] * 25
-            self._attr_rgb_color = (255, 255, 255)
-            self._speed = 50
-
+            _LOGGER.error(f"Error parsing d5 color: {e}")
 
     @property
     def is_on(self):
@@ -654,87 +217,65 @@ class LeproLedLight(LightEntity):
     def brightness(self):
         return self._brightness
 
-    @property
-    def effect(self):
-        return self._effect
-    
-    @property
-    def color_temp(self):
-        """Return the color temperature in mireds."""
-        return self._color_temp
-
-    async def _send_special_effect_command(self, effect):
-        """Send command for special (d2=3) effects using d60.
-           Uses self._sensitivity as 0..100 percent and encodes to 0x00..0x63.
-        """
-        try:
-            prefix = self.SPECIAL_EFFECT_TO_D60_PREFIX.get(effect)
-            if not prefix:
-                _LOGGER.error("Unknown special effect: %s", effect)
-                return
-
-            # Read sensitivity as percent 0..100
-            sens_percent = int(round(getattr(self, "_sensitivity", 50)))
-            # clamp percent
-            sens_percent = max(0, min(100, sens_percent))
-
-            # Encode percent (0..100) -> hex_val (0..0x63)
-            MAX_HEX = 0x63
-            hex_val = int(round(sens_percent * MAX_HEX / 100))
-            hex_val = max(0, min(MAX_HEX, hex_val))
-
-            sens_hex = f"{hex_val:02X}"  # two hex digits
-            d60_value = f"{prefix}{sens_hex}0000"
-
-            payload = {
-                "d1": 1,
-                "d2": 3,
-                "d60": d60_value,
-                "d52": self._map_ha_brightness(self._brightness)
-            }
-            await self._send_mqtt_command(payload)
-        except Exception as e:
-            _LOGGER.error("Failed to send special effect command %s: %s", effect, e)
-
-
-    async def _send_white_command(self):
-        """Send command for white-only bulbs (B1)"""
-        d30_value = self._mireds_to_d30(self._color_temp)
+    async def async_turn_on(self, **kwargs):
+        """Turn on the light using B1 Protocol."""
+        payload = {}
         
-        _LOGGER.info("Sending white command - mireds: %s, d30: %s, brightness: %s", 
-                     self._color_temp, d30_value, self._brightness)
-        
-        payload = {
-            "d1": 1,
-            "d2": 0,  # White mode
-            "d30": d30_value,
-            "d3": self._map_ha_brightness(self._brightness)
-        }
+        # Always send Trace ID (from your DpSwitchLedValue findings)
+        payload["d30"] = "ha_command"
+
+        # 1. Handle On/Off
+        payload["d1"] = 1
+        self._is_on = True
+
+        # 2. Handle Color Change
+        if ATTR_RGB_COLOR in kwargs:
+            rgb = kwargs[ATTR_RGB_COLOR]
+            self._attr_rgb_color = rgb
+            
+            # Convert RGB to HSV for Lepro
+            r, g, b = rgb
+            h, s, v = colorsys.rgb_to_hsv(r/255.0, g/255.0, b/255.0)
+            
+            # Format: HHHHSSSSVVVV (Hex)
+            h_val = int(h * 360)
+            s_val = int(s * 1000)
+            v_val = int(v * 1000)
+            
+            # Matches AIotUtils.java: String.format("%04X%04X%04X", hue, saturation, value)
+            d5_hex = f"{h_val:04X}{s_val:04X}{v_val:04X}"
+            
+            payload["d2"] = 2  # Switch to Color Mode
+            payload["d5"] = d5_hex
+            
+            # If brightness is also provided, update the V part of HSV, but d5 handles it usually
+            if ATTR_BRIGHTNESS in kwargs:
+                self._brightness = kwargs[ATTR_BRIGHTNESS]
+
+        # 3. Handle White Brightness Change (if no color change)
+        elif ATTR_BRIGHTNESS in kwargs:
+            self._brightness = kwargs[ATTR_BRIGHTNESS]
+            d3_val = self._map_ha_brightness(self._brightness)
+            
+            payload["d2"] = 1 # Switch to White Mode
+            payload["d3"] = d3_val
+
+        # Send the command
         await self._send_mqtt_command(payload)
-    
-    async def _send_effect_command(self):
-        """Send command for effect modes"""
-        # Generate d50 string with current colors/groups
-        d50_str = self._generate_d50_string()
-        
-        payload = {
-            "d1": 1,
-            "d2": 2,
-            "d50": d50_str,
-            "d52": self._map_ha_brightness(self._brightness)
-        }
-        await self._send_mqtt_command(payload)
+        self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs):
         """Turn off the light."""
-        payload = {"d1": 0}
+        payload = {
+            "d1": 0,
+            "d30": "ha_command"
+        }
         await self._send_mqtt_command(payload)
         self._is_on = False
-        self._attr_is_on = False
         self.async_write_ha_state()
 
     async def _send_mqtt_command(self, payload: dict):
-        """Send command via MQTT"""
+        """Send command via MQTT wrapped in standard envelope."""
         topic = f"le/{self._did}/prp/set"
         full_payload = {
             "id": random.randint(0, 1000000000),
@@ -743,117 +284,22 @@ class LeproLedLight(LightEntity):
         }
         try:
             await self._mqtt_client.publish(topic, json.dumps(full_payload))
-            _LOGGER.info("Sent MQTT command: %s - %s", topic, full_payload)
+            _LOGGER.debug("Sent MQTT command: %s - %s", topic, full_payload)
         except Exception as e:
             _LOGGER.error("Failed to send MQTT command: %s", e)
             
     async def async_added_to_hass(self):
-        """Run when entity is added to hass."""
         await super().async_added_to_hass()
         # Request initial state
-        await self._request_state_update()
-
-    async def _request_state_update(self):
-        """Request current state from device."""
         topic = f"le/{self._did}/prp/get"
-        # Request both switch state and brightness
-        payload = json.dumps({"d": ["d1", "d2", "d3", "d4", "d5", "d30", "d50", "d52", "d60", "online"]})
+        # Request standard B1 DPs
+        payload = json.dumps({"d": ["d1", "d2", "d3", "d5", "d30", "online"]})
         try:
             await self._mqtt_client.publish(topic, payload)
-            _LOGGER.debug("Requested state update for %s", self.name)
-        except Exception as e:
-            _LOGGER.error("Failed to request state update: %s", e)
-
-
-class LeproSegmentLight(LightEntity):
-    """Represents a single segment of a segmented Lepro LED."""
-    def __init__(self, parent: LeproLedLight, index: int):
-        self._parent = parent
-        self._index = index
-        self._attr_has_entity_name = True
-        self._attr_translation_key = "segment"
-        self._attr_unique_id = f"{parent._did}_segment_{str(index+1).rjust(2, '0')}"
-        self._attr_device_info = parent._attr_device_info
-        self._attr_color_mode = parent._attr_color_mode
-        self._attr_supported_color_modes = parent._attr_supported_color_modes
-        self._attr_supported_features = LightEntityFeature.EFFECT
-
-    # placeholder usato nei JSON: {index}
-    @property
-    def translation_placeholders(self) -> dict:
-        return {"index": str(self._index + 1).rjust(2, "0")}
-        
-    @property
-    def is_on(self):
-        return self._parent._is_on
-
-    @property
-    def brightness(self):
-        return self._parent._brightness
-
-    @property
-    def effect(self):
-        return self._parent._effect
-
-    @property
-    def rgb_color(self):
-        segs = getattr(self._parent, "_segment_colors", [(255,255,255)]*25)
-        if len(segs) > self._index:
-            return segs[self._index]
-        return (255,255,255)
-
-    # HA property used by UI (preferred attribute already in parent):
-    @property
-    def available(self):
-        return True
-
-    async def async_turn_on(self, **kwargs):
-        """Turn on (or change color) for this segment. Updating the parent triggers d50 send."""
-        # Update brightness if provided
-        if ATTR_BRIGHTNESS in kwargs:
-            new_brightness = kwargs[ATTR_BRIGHTNESS]
-            self._parent._brightness = new_brightness
-
-        # Update color if provided
-        if ATTR_RGB_COLOR in kwargs:            
-            # read new color, default to current segment color
-            new_color = kwargs.get(ATTR_RGB_COLOR, self.rgb_color)
-            # update parent's segment color
-            seg_colors = list(self._parent._segment_colors)
-            seg_colors[self._index] = tuple(int(c) for c in new_color)
-            self._parent._segment_colors = seg_colors
-            # If this is segment 0 (first) update parent's primary color too
-            if self._index == 0:
-                self._parent._attr_rgb_color = tuple(int(c) for c in new_color)
-            # send updated d50 via parent
-
-        try:
-            if self._parent._effect in self._parent.SPECIAL_EFFECTS:
-                await self._parent._send_special_effect_command(self._parent._effect)
-            else:
-                await self._parent._send_effect_command()
-                
-        except Exception as e:
-            _LOGGER.error("Error sending d50 after segment change: %s", e)
-        # update states: parent + all segments
-        try:
-            self._parent.async_write_ha_state()
-            segments = self.hass.data[DOMAIN][self._parent._entry_id].get('segments', {}).get(self._parent._did, [])
-            for seg in segments:
-                try:
-                    seg.async_write_ha_state()
-                except Exception:
-                    pass
         except Exception:
             pass
 
-    async def async_turn_off(self, **kwargs):
-        """Turning off a single segment maps to turning off the parent device."""
-        await self._parent.async_turn_off(**kwargs)
-
-
 async def download_cert_file(session, url, path, headers):
-    """Download a certificate file asynchronously."""
     async with session.get(url, headers=headers) as resp:
         if resp.status != 200:
             raise Exception(f"Failed to download {url}: {resp.status}")
@@ -861,56 +307,50 @@ async def download_cert_file(session, url, path, headers):
         async with aiofiles.open(path, 'wb') as f:
             await f.write(data)
 
-def create_ssl_context(root_ca_path, client_cert_path, keyfile_path):
-    """Create SSL context in a thread-safe manner."""
+def create_ssl_context(root_ca_path, client_cert_path):
+    """
+    Create SSL context. 
+    NOTE: The Lepro 'cert' download contains BOTH the Certificate and Private Key.
+    So we use the same file path for certfile and keyfile.
+    """
     context = ssl.create_default_context()
     context.load_verify_locations(cafile=root_ca_path)
-    context.load_cert_chain(certfile=client_cert_path, keyfile=keyfile_path)
+    context.load_cert_chain(certfile=client_cert_path, keyfile=client_cert_path)
     return context
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback):
-    """Set up Lepro LED lights from config entry."""
     config = hass.data["lepro_led"][entry.entry_id]
     account = config["account"]
     password = config["password"]
-    
-    # Create a mutable copy of the config
     config_data = dict(config)
     
-    # Generate persistent MAC if not exists
+    # Generate persistent MAC
     if "persistent_mac" not in config_data:
-        # Create a hash of the account to generate a persistent MAC
         mac_hash = hashlib.md5(config_data["account"].encode()).hexdigest()
         persistent_mac = f"02:{mac_hash[0:2]}:{mac_hash[2:4]}:{mac_hash[4:6]}:{mac_hash[6:8]}:{mac_hash[8:10]}"
         config_data["persistent_mac"] = persistent_mac
-        
-        # Save updated config to the entry
         hass.config_entries.async_update_entry(entry, data=config_data)
-        _LOGGER.info("Generated persistent MAC: %s", persistent_mac)
     
-    # Use the persistent MAC from config_data
     mac = config_data["persistent_mac"]
     language = config_data.get("language", "it")
-    fcm_token = config_data.get("fcm_token", "dfi8s76mRTCxRxm3UtNp2z:APA91bHWMEWKT9CgNfGJ961jot2qgfYdWePbO5sQLovSFDI7U_H-ulJiqIAB2dpZUUrhzUNWR3OE_eM83i9IDLk1a5ZRwHDxMA_TnGqdpE8H-0_JML8pBFA")
+    # This token is standard for the app
+    fcm_token = "dfi8s76mRTCxRxm3UtNp2z:APA91bHWMEWKT9CgNfGJ961jot2qgfYdWePbO5sQLovSFDI7U_H-ulJiqIAB2dpZUUrhzUNWR3OE_eM83i9IDLk1a5ZRwHDxMA_TnGqdpE8H-0_JML8pBFA"
     
-    # Update hass.data with the new config
     hass.data["lepro_led"][entry.entry_id] = config_data
     
-    # ... rest of the setup code ...
-    # 1) Create certificate directory
+    # Setup Cert Directory
     cert_dir = os.path.join(hass.config.config_dir, ".lepro_led")
     if not os.path.exists(cert_dir):
         await hass.async_add_executor_job(os.makedirs, cert_dir)
 
     root_ca_path = os.path.join(cert_dir, f"{entry.entry_id}_root_ca.pem")
-    client_cert_path = os.path.join(cert_dir, f"{entry.entry_id}_client_cert.pem")
-    keyfile_path = os.path.join(os.path.dirname(__file__), "client_key.pem")
+    # This file will hold BOTH cert and key
+    client_cert_path = os.path.join(cert_dir, f"{entry.entry_id}_client_combined.pem")
 
     async with aiohttp.ClientSession() as session:
-        # 1) Login and get bearer token
+        # 1) Login
         bearer_token = await async_login(session, account, password, mac, language, fcm_token)
         if bearer_token is None:
-            _LOGGER.error("Failed to login to Lepro API")
             return
 
         headers = {
@@ -919,84 +359,56 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             "App-Version": "1.0.9.202",
             "Device-Model": "custom_integration",
             "Device-System": "custom",
-            "GMT": "+0",
             "Host": "api-eu-iot.lepro.com",
-            "Language": language,
-            "Platform": "2",
-            "Screen-Size": "1536*2048",
-            "Slanguage": language,
             "User-Agent": "LE/1.0.9.202 (Custom Integration)",
+            "Timestamp": str(int(time.time()))
         }
 
-        # 2) Get user profile to find uid and MQTT info
-        user_url = USER_PROFILE_URL
-        timestamp = str(int(time.time()))
-        headers["Timestamp"] = timestamp
-        
-        async with session.get(user_url, headers=headers) as resp:
+        # 2) Get Profile
+        async with session.get(USER_PROFILE_URL, headers=headers) as resp:
             if resp.status != 200:
-                _LOGGER.error("Failed to get user profile from Lepro API")
+                _LOGGER.error("Failed to get profile")
                 return
             user_data = await resp.json()
 
         try:
-            uid = user_data["data"]["uid"]
             mqtt_info = user_data["data"]["mqtt"]
-        except KeyError as e:
-            _LOGGER.error("Failed to parse user profile response: %s", e)
+        except KeyError:
             return
 
-        # 3) Download certificates within the same session
+        # 3) Download Certs
         try:
             await download_cert_file(session, mqtt_info["root"], root_ca_path, headers)
+            # The 'cert' URL returns a file with BEGIN CERTIFICATE and BEGIN PRIVATE KEY
             await download_cert_file(session, mqtt_info["cert"], client_cert_path, headers)
         except Exception as e:
-            _LOGGER.error("Certificate download failed: %s", e)
+            _LOGGER.error("Cert download failed: %s", e)
             return
 
-        # 4) Get family list to find fid
-        family_url = FAMILY_LIST_URL.format(timestamp=timestamp)
+        # 4) Get Devices (Logic simplified to find FID automatically)
+        family_url = FAMILY_LIST_URL.format(timestamp=headers["Timestamp"])
         async with session.get(family_url, headers=headers) as resp:
-            if resp.status != 200:
-                _LOGGER.error("Failed to get family list from Lepro API")
-                return
             family_data = await resp.json()
-
-        try:
             fid = family_data["data"]["list"][0]["fid"]
-        except (KeyError, IndexError) as e:
-            _LOGGER.error("Failed to parse fid from family list response: %s", e)
-            return
 
-        # 5) Get device list by fid
-        timestamp = str(int(time.time()))
-        device_url = DEVICE_LIST_URL.format(fid=fid, timestamp=timestamp)
-        headers["Timestamp"] = timestamp
-
+        device_url = DEVICE_LIST_URL.format(fid=fid, timestamp=str(int(time.time())))
+        headers["Timestamp"] = str(int(time.time()))
         async with session.get(device_url, headers=headers) as resp:
-            if resp.status != 200:
-                _LOGGER.error("Failed to get device list from Lepro API")
-                return
             device_data = await resp.json()
+            devices = device_data.get("data", {}).get("list", [])
 
-        devices = device_data.get("data", {}).get("list", [])
-        if not devices:
-            _LOGGER.warning("No devices found in Lepro account")
-            return
-
-    # 6) Create SSL context in executor thread
+    # 5) Create SSL Context (Using combined file for key and cert)
     try:
         ssl_context = await hass.async_add_executor_job(
             create_ssl_context, 
             root_ca_path, 
-            client_cert_path, 
-            keyfile_path
+            client_cert_path
         )
     except Exception as e:
-        _LOGGER.error("Failed to create SSL context: %s", e)
+        _LOGGER.error("SSL Context error: %s", e)
         return
 
-    # 7) Create MQTT client
+    # 6) Connect MQTT
     client_id_suffix = hashlib.sha256(entry.entry_id.encode()).hexdigest()[:32]
     client_id = f"lepro-app-{client_id_suffix}"
     
@@ -1011,159 +423,72 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     try:
         await mqtt_client.connect()
     except Exception as e:
-        _LOGGER.error("MQTT connection failed: %s", e)
+        _LOGGER.error("MQTT Connect failed: %s", e)
         return
     
-    # 8) Create entities
+    # 7) Setup Entities
     entities = []
     device_entity_map = {}
-    segments_map = {}
+    
     for device in devices:
         entity = LeproLedLight(device, mqtt_client, entry.entry_id)
         entities.append(entity)
         device_entity_map[str(device['did'])] = entity
 
-        # If this is a segmented series (S1-5) create 25 segment lights
-        series = device.get("series", "") or ""
-        if "S1-5" in series:
-            segs = []
-            for idx in range(25):
-                seg_entity = LeproSegmentLight(entity, idx)
-                entities.append(seg_entity)
-                segs.append(seg_entity)
-            segments_map[str(device['did'])] = segs
-    
-    # 9) Message handler
-    # Update the message handler to process all relevant fields
+    # 8) Message Handler
     async def handle_mqtt_message(message):
         try:
             topic = message.topic.value
             payload = json.loads(message.payload.decode())
-            _LOGGER.debug("Received MQTT message: %s - %s", topic, payload)
             
             parts = topic.split('/')
             if len(parts) < 4 or parts[0] != "le":
                 return
                 
             did = parts[1]
-            message_type = parts[3]
             entity = device_entity_map.get(did)
-            
             if not entity:
                 return
-                
-            # Handle different message types
-            if message_type in ["rpt", "set", "getr"]:
-                data = payload.get('d', {})
-                
-                # Update basic state
-                if 'd1' in data:
-                    entity._is_on = bool(data['d1'])
-                
-                # Update mode
-                if 'd2' in data:
-                    entity._mode = data['d2']
-                    # Update color mode based on device mode
-                    if entity._mode == 0:
-                        entity._attr_color_mode = ColorMode.COLOR_TEMP
-                    elif entity._mode == 2:
-                        entity._attr_color_mode = ColorMode.RGB
-                    elif entity._mode == 3:
-                        entity._attr_color_mode = ColorMode.RGB  # Special effects still RGB
-                
-                # Update brightness based on mode
-                if 'd52' in data:
-                    # RGB strips use d52
-                    entity._brightness = entity._map_device_brightness(data['d52'])
-                    entity._attr_brightness = entity._brightness
-                elif 'd3' in data:
-                    # White mode uses d3
-                    entity._brightness = entity._map_device_brightness(data['d3'])
-                    entity._attr_brightness = entity._brightness
-                
-                # Update color temperature (for white mode)
-                if 'd30' in data:
-                    entity._parse_d30(data['d30'])
-                
-                # Update effect and colors (for RGB mode)
-                if 'd50' in data:
-                    entity._parse_d50(data['d50'])
-                
-                # Update d60: special effects and sensitivity
-                if 'd60' in data:
-                    sens, parsed_effect = entity._parse_d60(data['d60'])
-                    # update sensitivity
-                    entity._sensitivity = sens
-                    # If parser recognizes a special effect code, set it
-                    if parsed_effect:
-                        entity._effect = parsed_effect
 
-                # Update effect based on mode (mode==3 indicates special effects)
-                if entity._mode == 3 and entity._effect not in entity.SPECIAL_EFFECTS:
-                    # If we have no parsed effect but mode says special, default to flash
-                    entity._effect = entity.EFFECT_FLASH
+            data = payload.get('d', {})
+            
+            # d1: On/Off
+            if 'd1' in data:
+                entity._is_on = bool(data['d1'])
+            
+            # d2: Mode
+            if 'd2' in data:
+                entity._mode = data['d2']
+            
+            # d3: White Brightness
+            if 'd3' in data:
+                entity._brightness = entity._map_device_brightness(data['d3'])
+            
+            # d5: Color Data
+            if 'd5' in data:
+                entity._parse_d5(data['d5'])
 
-                # update main + segments states
-                entity.async_write_ha_state()
-
-                # NEW: also refresh any number entities (speed / sensitivity) linked to this device
-                try:
-                    numbers_map = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("numbers", {})
-                    for num in numbers_map.get(did, []):
-                        try:
-                            num.async_write_ha_state()
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-
-                try:
-                    for seg in segments_map.get(did, []):
-                        seg.async_write_ha_state()
-                except Exception:
-                    pass
-
-                if entity._is_white_only:
-                    _LOGGER.debug("Updated state for B1 bulb %s: on=%s, mode=%s, brightness=%s, color_temp=%s", 
-                                 entity.name, entity._is_on, entity._mode, entity._brightness, entity._color_temp)
-                else:
-                    _LOGGER.debug("Updated state for %s: on=%s, mode=%s, effect=%s, brightness=%s, speed=%s, rgb=%s, sensitivity=%s", 
-                                 entity.name, entity._is_on, entity._mode, entity._effect, entity._brightness, entity._speed, entity._segment_colors[0], entity._sensitivity)
+            entity.async_write_ha_state()
                     
-        except Exception as e:
-            _LOGGER.error("Error processing MQTT message: %s", e)
+        except Exception:
+            pass
    
     mqtt_client.set_message_callback(handle_mqtt_message)
     
-    # 10) Subscribe and start
-    await mqtt_client.subscribe(f"le/{client_id_suffix}/act/app/exe")
+    # Subscribe
     for did in device_entity_map.keys():
         await mqtt_client.subscribe(f"le/{did}/prp/#")
     
-    # Store for cleanup
-    if DOMAIN not in hass.data:
-        hass.data[DOMAIN] = {}
     hass.data[DOMAIN][entry.entry_id] = {
         'mqtt_client': mqtt_client,
-        'entities': entities,
-        'segments': segments_map
+        'entities': entities
     }
     
     async_add_entities(entities)
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload MQTT client and entities."""
     data = hass.data[DOMAIN].get(entry.entry_id)
-    if not data:
-        return True
-        
-    # Disconnect MQTT client
-    await data['mqtt_client'].disconnect()
-    
-    # Remove entities
-    for entity in data['entities']:
-        await entity.async_remove()
-        
-    hass.data[DOMAIN].pop(entry.entry_id)
+    if data:
+        await data['mqtt_client'].disconnect()
+        hass.data[DOMAIN].pop(entry.entry_id)
     return True
-    
