@@ -199,12 +199,12 @@ class LeproLedLight(LightEntity):
     def _map_ha_to_lepro(self, value):
         """Map 0-255 (HA) to 10-1000 (Lepro)"""
         if value is None: return 1000
-        return max(10, int(value * 1000 / 255))
+        return max(10, round(value * 1000 / 255))
 
     def _map_lepro_to_ha(self, value):
         """Map 10-1000 (Lepro) to 0-255 (HA)"""
         if value is None: return 255
-        return int(value * 255 / 1000)
+        return round(value * 255 / 1000)
 
     def _map_kelvin_to_d4(self, kelvin):
         """Map Kelvin (2700-6500) to d4 (0-1000)"""
@@ -227,8 +227,8 @@ class LeproLedLight(LightEntity):
             # Store as HS color (Home Assistant format: H=0-360, S=0-100)
             self._attr_hs_color = (float(h_int), s_int / 10.0)
             
-            # V component is brightness in color mode
-            self._brightness = max(1, int(v_int * 255 / 1000))
+            # V component is brightness in color mode - use round() to avoid drift
+            self._brightness = max(1, round(v_int * 255 / 1000))
             
             _LOGGER.debug("Parsed d5=%s -> HS=(%s, %s), brightness=%s", 
                          hex_str, h_int, s_int/10.0, self._brightness)
