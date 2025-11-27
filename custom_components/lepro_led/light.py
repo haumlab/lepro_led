@@ -17,7 +17,7 @@ from homeassistant.core import callback
 
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
-    ATTR_RGB_COLOR,
+    ATTR_HS_COLOR,
     ATTR_COLOR_TEMP_KELVIN,
     LightEntity,
     ColorMode,
@@ -178,17 +178,17 @@ class LeproLedLight(LightEntity):
         # d4: Color Temp (0-1000, 0=2700K, 1000=6500K)
         self._color_temp_kelvin = self._map_d4_to_kelvin(device.get("d4", 0))
         
-        # d5: Color Hex String
-        self._attr_rgb_color = (255, 255, 255)
+        # d5: Color Hex String - stores Hue (0-360) and Saturation (0-100)
+        self._attr_hs_color = (0.0, 100.0)  # Default red at full saturation
         if "d5" in device:
             self._parse_d5(device["d5"])
             
         # --- Capabilities ---
-        self._attr_supported_color_modes = {ColorMode.RGB, ColorMode.COLOR_TEMP}
+        self._attr_supported_color_modes = {ColorMode.HS, ColorMode.COLOR_TEMP}
         
         # Determine current Color Mode for HA
         if self._mode == 1:
-            self._attr_color_mode = ColorMode.RGB
+            self._attr_color_mode = ColorMode.HS
         else:
             self._attr_color_mode = ColorMode.COLOR_TEMP
             
@@ -220,26 +220,20 @@ class LeproLedLight(LightEntity):
         """Parse d5: HHHHSSSSBBBB (12 hex chars)"""
         try:
             if not hex_str or len(hex_str) < 12: return
-            h_int = int(hex_str[0:4], 16) # Hue 0-360
-            s_int = int(hex_str[4:8], 16) # Sat 0-1000
-            v_int = int(hex_str[8:12], 16) # Val 0-1000
+            h_int = int(hex_str[0:4], 16)  # Hue 0-360
+            s_int = int(hex_str[4:8], 16)  # Sat 0-1000
+            v_int = int(hex_str[8:12], 16) # Val/Brightness 0-1000
             
-            # Store the HS values and convert to RGB at full brightness (V=1.0)
-            # This is important: HA expects RGB color to be the "pure" color,
-            # with brightness controlled separately via the brightness property
-            h = h_int / 360.0
-            s = s_int / 1000.0
+            # Store as HS color (Home Assistant format: H=0-360, S=0-100)
+            self._attr_hs_color = (float(h_int), s_int / 10.0)
             
-            # Convert to RGB at full value (brightness) - HA handles brightness separately
-            r, g, b = colorsys.hsv_to_rgb(h, s, 1.0)
-            self._attr_rgb_color = (int(r*255), int(g*255), int(b*255))
+            # V component is brightness in color mode
+            self._brightness = max(1, int(v_int * 255 / 1000))
             
-            # In color mode, the V component IS the brightness
-            # Update brightness from V when in color mode
-            if self._mode == 1:
-                self._brightness = int(v_int * 255 / 1000)
-        except Exception:
-            pass
+            _LOGGER.debug("Parsed d5=%s -> HS=(%s, %s), brightness=%s", 
+                         hex_str, h_int, s_int/10.0, self._brightness)
+        except Exception as e:
+            _LOGGER.error("Error parsing d5: %s", e)
 
     # --- Properties ---
     @property
@@ -260,84 +254,55 @@ class LeproLedLight(LightEntity):
         payload["d1"] = 1
         self._is_on = True
         
-        # Determine the brightness to use
+        # Get brightness - use provided or current, ensure minimum of 10 (HA scale)
         if ATTR_BRIGHTNESS in kwargs:
-            new_brightness = kwargs[ATTR_BRIGHTNESS]
-            self._brightness = new_brightness
-        else:
-            new_brightness = self._brightness
+            self._brightness = max(10, kwargs[ATTR_BRIGHTNESS])
         
-        # 1. Color Change Requested (d2=1, d5=Hex)
-        if ATTR_RGB_COLOR in kwargs:
-            rgb = kwargs[ATTR_RGB_COLOR]
+        # 1. Color (HS) Change Requested
+        if ATTR_HS_COLOR in kwargs:
+            hs = kwargs[ATTR_HS_COLOR]
+            self._attr_hs_color = hs
             
-            # Convert RGB -> HSV
-            r, g, b = rgb
-            h, s, v = colorsys.rgb_to_hsv(r/255.0, g/255.0, b/255.0)
-            
-            # IMPORTANT: Home Assistant's color picker sends RGB at the "displayed" brightness.
-            # We need to normalize the color to full brightness and store that.
-            # Then we use our separate brightness control for the actual brightness.
-            
-            # Normalize saturation: if V from the picker is very low, the color might
-            # look desaturated. We keep S as-is but always store the color at full V.
-            if v > 0:
-                # Store the normalized RGB color (at full brightness/value)
-                r_norm, g_norm, b_norm = colorsys.hsv_to_rgb(h, s, 1.0)
-                self._attr_rgb_color = (int(r_norm*255), int(g_norm*255), int(b_norm*255))
-            else:
-                # Black was selected - keep current color, just dim
-                self._attr_rgb_color = rgb
-            
-            # Use the entity's brightness (controlled separately by HA brightness slider)
-            # NOT the V component from the picked color
-            v_for_bulb = new_brightness / 255.0
-            
-            # Ensure minimum brightness
-            if v_for_bulb < 0.04:  # ~10/255, minimum visible brightness
-                v_for_bulb = 0.04
-                self._brightness = 10
-            
-            h_val = int(h * 360)
-            s_val = int(s * 1000)
-            v_val = int(v_for_bulb * 1000)
+            # Convert HA HS (H=0-360, S=0-100) to Lepro d5 format
+            h_val = int(hs[0])  # Hue 0-360
+            s_val = int(hs[1] * 10)  # Saturation: HA 0-100 -> Lepro 0-1000
+            v_val = self._map_ha_to_lepro(self._brightness)  # Brightness as V
             
             d5_hex = f"{h_val:04X}{s_val:04X}{v_val:04X}"
             
-            payload["d2"] = 1 # Color Mode
+            payload["d2"] = 1  # Color Mode
             payload["d5"] = d5_hex
-            self._attr_color_mode = ColorMode.RGB
+            self._attr_color_mode = ColorMode.HS
             self._mode = 1
+            
+            _LOGGER.debug("Color change: HS=%s, brightness=%s, d5=%s", hs, self._brightness, d5_hex)
 
-        # 2. Color Temp Change Requested (d2=0, d3=Bright, d4=Temp)
+        # 2. Color Temp Change Requested
         elif ATTR_COLOR_TEMP_KELVIN in kwargs:
             kelvin = kwargs[ATTR_COLOR_TEMP_KELVIN]
             self._color_temp_kelvin = kelvin
             
-            d3_val = self._map_ha_to_lepro(new_brightness)
+            d3_val = self._map_ha_to_lepro(self._brightness)
             d4_val = self._map_kelvin_to_d4(kelvin)
             
-            payload["d2"] = 0 # White Mode
+            payload["d2"] = 0  # White Mode
             payload["d3"] = d3_val
             payload["d4"] = d4_val
             self._attr_color_mode = ColorMode.COLOR_TEMP
             self._mode = 0
 
-        # 3. Only Brightness Changed
+        # 3. Only Brightness Changed (or just turn on)
         elif ATTR_BRIGHTNESS in kwargs:
-            if self._mode == 1: # Current Color Mode
-                # We need to re-send d5 with updated V component
-                r, g, b = self._attr_rgb_color
-                h, s, _ = colorsys.rgb_to_hsv(r/255.0, g/255.0, b/255.0)
-                v = new_brightness / 255.0
-                
-                h_val = int(h * 360)
-                s_val = int(s * 1000)
-                v_val = int(v * 1000)
+            if self._mode == 1:  # Color Mode - update d5 with new brightness
+                hs = self._attr_hs_color
+                h_val = int(hs[0])
+                s_val = int(hs[1] * 10)
+                v_val = self._map_ha_to_lepro(self._brightness)
                 d5_hex = f"{h_val:04X}{s_val:04X}{v_val:04X}"
                 payload["d5"] = d5_hex
-            else: # Current White Mode
-                payload["d3"] = self._map_ha_to_lepro(new_brightness)
+                _LOGGER.debug("Brightness change in color mode: d5=%s", d5_hex)
+            else:  # White Mode
+                payload["d3"] = self._map_ha_to_lepro(self._brightness)
 
         await self._send_mqtt_command(payload)
         self.async_write_ha_state()
@@ -595,7 +560,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
                 
                 # Update HA State
                 if entity._mode == 1:
-                    entity._attr_color_mode = ColorMode.RGB
+                    entity._attr_color_mode = ColorMode.HS
                 else:
                     entity._attr_color_mode = ColorMode.COLOR_TEMP
 
