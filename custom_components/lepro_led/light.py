@@ -224,12 +224,20 @@ class LeproLedLight(LightEntity):
             s_int = int(hex_str[4:8], 16) # Sat 0-1000
             v_int = int(hex_str[8:12], 16) # Val 0-1000
             
-            # Convert to RGB
+            # Store the HS values and convert to RGB at full brightness (V=1.0)
+            # This is important: HA expects RGB color to be the "pure" color,
+            # with brightness controlled separately via the brightness property
             h = h_int / 360.0
             s = s_int / 1000.0
-            v = v_int / 1000.0
-            r, g, b = colorsys.hsv_to_rgb(h, s, v)
+            
+            # Convert to RGB at full value (brightness) - HA handles brightness separately
+            r, g, b = colorsys.hsv_to_rgb(h, s, 1.0)
             self._attr_rgb_color = (int(r*255), int(g*255), int(b*255))
+            
+            # In color mode, the V component IS the brightness
+            # Update brightness from V when in color mode
+            if self._mode == 1:
+                self._brightness = int(v_int * 255 / 1000)
         except Exception:
             pass
 
@@ -252,42 +260,54 @@ class LeproLedLight(LightEntity):
         payload["d1"] = 1
         self._is_on = True
         
-        # Brightness Handling
-        new_brightness = kwargs.get(ATTR_BRIGHTNESS, self._brightness)
-        self._brightness = new_brightness
+        # Determine the brightness to use
+        if ATTR_BRIGHTNESS in kwargs:
+            new_brightness = kwargs[ATTR_BRIGHTNESS]
+            self._brightness = new_brightness
+        else:
+            new_brightness = self._brightness
         
         # 1. Color Change Requested (d2=1, d5=Hex)
         if ATTR_RGB_COLOR in kwargs:
             rgb = kwargs[ATTR_RGB_COLOR]
-            self._attr_rgb_color = rgb
             
             # Convert RGB -> HSV
             r, g, b = rgb
             h, s, v = colorsys.rgb_to_hsv(r/255.0, g/255.0, b/255.0)
             
-            # Note: For Color mode, Brightness is part of d5 string (the V component)
-            # If ATTR_BRIGHTNESS was sent, use that brightness
-            # Otherwise, use the current entity brightness (not the V from RGB conversion)
-            if ATTR_BRIGHTNESS in kwargs:
-                v = new_brightness / 255.0
-            else:
-                # Use current brightness instead of V from RGB to prevent unexpected dimming
-                v = self._brightness / 255.0
+            # IMPORTANT: Home Assistant's color picker sends RGB at the "displayed" brightness.
+            # We need to normalize the color to full brightness and store that.
+            # Then we use our separate brightness control for the actual brightness.
             
-            # Ensure minimum brightness when switching to color mode
-            if v < 0.04:  # ~10/255, minimum visible brightness
-                v = 1.0  # Default to full brightness if too dim
-                self._brightness = 255
+            # Normalize saturation: if V from the picker is very low, the color might
+            # look desaturated. We keep S as-is but always store the color at full V.
+            if v > 0:
+                # Store the normalized RGB color (at full brightness/value)
+                r_norm, g_norm, b_norm = colorsys.hsv_to_rgb(h, s, 1.0)
+                self._attr_rgb_color = (int(r_norm*255), int(g_norm*255), int(b_norm*255))
+            else:
+                # Black was selected - keep current color, just dim
+                self._attr_rgb_color = rgb
+            
+            # Use the entity's brightness (controlled separately by HA brightness slider)
+            # NOT the V component from the picked color
+            v_for_bulb = new_brightness / 255.0
+            
+            # Ensure minimum brightness
+            if v_for_bulb < 0.04:  # ~10/255, minimum visible brightness
+                v_for_bulb = 0.04
+                self._brightness = 10
             
             h_val = int(h * 360)
             s_val = int(s * 1000)
-            v_val = int(v * 1000)
+            v_val = int(v_for_bulb * 1000)
             
             d5_hex = f"{h_val:04X}{s_val:04X}{v_val:04X}"
             
             payload["d2"] = 1 # Color Mode
             payload["d5"] = d5_hex
             self._attr_color_mode = ColorMode.RGB
+            self._mode = 1
 
         # 2. Color Temp Change Requested (d2=0, d3=Bright, d4=Temp)
         elif ATTR_COLOR_TEMP_KELVIN in kwargs:
@@ -301,6 +321,7 @@ class LeproLedLight(LightEntity):
             payload["d3"] = d3_val
             payload["d4"] = d4_val
             self._attr_color_mode = ColorMode.COLOR_TEMP
+            self._mode = 0
 
         # 3. Only Brightness Changed
         elif ATTR_BRIGHTNESS in kwargs:
@@ -560,14 +581,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
                 if 'd2' in data:
                     entity._mode = data['d2']
                 
-                if 'd3' in data:
-                    entity._brightness = entity._map_lepro_to_ha(data['d3'])
-                
                 if 'd4' in data:
                     entity._color_temp_kelvin = entity._map_d4_to_kelvin(data['d4'])
                 
+                # Handle d5 first (contains brightness for color mode)
                 if 'd5' in data:
                     entity._parse_d5(data['d5'])
+                
+                # d3 is brightness for white mode - only update if NOT in color mode
+                # (in color mode, brightness comes from d5's V component)
+                if 'd3' in data and entity._mode != 1:
+                    entity._brightness = entity._map_lepro_to_ha(data['d3'])
                 
                 # Update HA State
                 if entity._mode == 1:
@@ -577,7 +601,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
                 entity.async_write_ha_state()
 
-                _LOGGER.debug("Updated state for %s: on=%s, mode=%s", entity.name, entity._is_on)
+                _LOGGER.debug("Updated state for %s: on=%s, mode=%s, brightness=%s", entity.name, entity._is_on, entity._mode, entity._brightness)
                     
         except Exception as e:
             _LOGGER.error("Error processing MQTT message: %s", e)
