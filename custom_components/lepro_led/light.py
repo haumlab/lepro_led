@@ -18,11 +18,9 @@ from homeassistant.core import callback
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_RGB_COLOR,
-    ATTR_EFFECT,
     ATTR_COLOR_TEMP_KELVIN,
     LightEntity,
     ColorMode,
-    LightEntityFeature,
 )
 
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -268,9 +266,18 @@ class LeproLedLight(LightEntity):
             h, s, v = colorsys.rgb_to_hsv(r/255.0, g/255.0, b/255.0)
             
             # Note: For Color mode, Brightness is part of d5 string (the V component)
-            # If ATTR_BRIGHTNESS was sent, override V
+            # If ATTR_BRIGHTNESS was sent, use that brightness
+            # Otherwise, use the current entity brightness (not the V from RGB conversion)
             if ATTR_BRIGHTNESS in kwargs:
                 v = new_brightness / 255.0
+            else:
+                # Use current brightness instead of V from RGB to prevent unexpected dimming
+                v = self._brightness / 255.0
+            
+            # Ensure minimum brightness when switching to color mode
+            if v < 0.04:  # ~10/255, minimum visible brightness
+                v = 1.0  # Default to full brightness if too dim
+                self._brightness = 255
             
             h_val = int(h * 360)
             s_val = int(s * 1000)
