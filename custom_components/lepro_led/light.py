@@ -9,7 +9,7 @@ import os
 import hashlib
 import re
 import numpy as np
-import colorsys  # Added for Color conversion
+import colorsys  # REQUIRED for B1 Color conversion
 from .const import DOMAIN, LOGIN_URL, FAMILY_LIST_URL, USER_PROFILE_URL, DEVICE_LIST_URL, SWITCH_API_URL
 from aiomqtt import Client, MqttError
 import aiofiles
@@ -149,18 +149,17 @@ async def async_login(session, account, password, mac, language="it", fcm_token=
 
 
 class LeproLedLight(LightEntity):
-    # Removed Effect Constants and D60 mappings as they are for LED Strips, not B1 Bulb.
+    # UPDATED: Class logic rewritten for B1 Bulb Protocol (d1/d3/d5)
     
     def __init__(self, device, mqtt_client, entry_id):
         self._device = device
-        # self._attr_name = device["name"]
         self._attr_unique_id = str(device["did"])
         self._fid = device["fid"]
         self._mqtt_client = mqtt_client
         self._entry_id = entry_id
         self._did = str(device["did"])
         self._attr_has_entity_name = True
-        self._attr_translation_key = "bulb" # Changed to bulb
+        self._attr_translation_key = "bulb"
         self._attr_device_info = {
             "identifiers": {(DOMAIN, self._did)},
             "name": device["name"],
@@ -178,7 +177,7 @@ class LeproLedLight(LightEntity):
         # d3: White Brightness (0-1000)
         self._brightness = self._map_device_brightness(device.get("d3", 1000))
         
-        # Initialize color from d5 (Hex string) if present
+        # d5: Color (Hex String) - Defaults to white if missing
         self._attr_rgb_color = (255, 255, 255)
         if "d5" in device:
             self._parse_d5(device["d5"])
@@ -187,13 +186,10 @@ class LeproLedLight(LightEntity):
         self._attr_supported_features = LightEntityFeature.EFFECT
         self._attr_color_mode = ColorMode.RGB
         self._attr_supported_color_modes = {ColorMode.RGB}
-        
-        # B1 specific effects (if any) can be added here, currently empty
-        self._attr_effect_list = []
+        self._attr_effect_list = [] 
             
     def _map_device_brightness(self, device_brightness):
         """Map device brightness (0-1000) to HA brightness (0-255)"""
-        # B1 uses 0-1000 range based on JADX
         return int(device_brightness * 255 / 1000)
     
     def _map_ha_brightness(self, ha_brightness):
@@ -202,11 +198,11 @@ class LeproLedLight(LightEntity):
     
     def _parse_d5(self, hex_str):
         """
-        Parse d5 Hex String from B1 Protocol (AIotUtils.java)
+        Parse d5 Hex String from B1 Protocol.
         Format: HHHHSSSSVVVV (Hue 0-360, Sat 0-1000, Val 0-1000)
         """
         try:
-            if len(hex_str) < 12:
+            if not hex_str or len(hex_str) < 12:
                 return
             h_int = int(hex_str[0:4], 16)
             s_int = int(hex_str[4:8], 16)
@@ -233,17 +229,15 @@ class LeproLedLight(LightEntity):
         """Turn on the light with optional parameters."""
         payload = {}
         
-        # Determine new values from kwargs
-        brightness = kwargs.get(ATTR_BRIGHTNESS, self._brightness)
-        
-        # B1 Protocol always needs d1=1 for ON
+        # 1. Basic ON
         payload["d1"] = 1
+        payload["d30"] = "ha_cmd" # Trace ID
         self._is_on = True
         
-        # Add trace ID (required by app logic)
-        payload["d30"] = "ha_cmd"
+        # 2. Get Requested Brightness
+        brightness = kwargs.get(ATTR_BRIGHTNESS, self._brightness)
         
-        # Handle Color Change
+        # 3. Handle Color Change
         if ATTR_RGB_COLOR in kwargs:
             rgb_color = kwargs[ATTR_RGB_COLOR]
             self._attr_rgb_color = rgb_color
@@ -252,7 +246,7 @@ class LeproLedLight(LightEntity):
             r, g, b = rgb_color
             h, s, v = colorsys.rgb_to_hsv(r/255.0, g/255.0, b/255.0)
             
-            # Use provided brightness for V if available, otherwise use current V
+            # Use brightness if provided for V, else use existing
             if ATTR_BRIGHTNESS in kwargs:
                 v = brightness / 255.0
                 self._brightness = brightness
@@ -267,22 +261,16 @@ class LeproLedLight(LightEntity):
             payload["d2"] = 2  # Color Mode
             payload["d5"] = d5_hex
             
-        # Handle White Brightness Change (Only if no color change requested)
+        # 4. Handle White Brightness (Only if no color change)
         elif ATTR_BRIGHTNESS in kwargs:
             self._brightness = brightness
             d3_val = self._map_ha_brightness(brightness)
             
-            # If we are in color mode, we probably want to stay in color mode but dim it
-            # But B1 separates White (d3) and Color (d5). 
-            # Simple logic: If we are currently White (mode 1), send d3. 
-            # If we are Color (mode 2), we should re-send d5 with lower V.
-            
+            # If currently in color mode (2), stay in color but dim it
             if self._mode == 2:
-                 # Re-calculate d5 with new brightness
                  r, g, b = self._attr_rgb_color
                  h, s, _ = colorsys.rgb_to_hsv(r/255.0, g/255.0, b/255.0)
                  v = brightness / 255.0
-                 
                  h_val = int(h * 360)
                  s_val = int(s * 1000)
                  v_val = int(v * 1000)
@@ -292,7 +280,6 @@ class LeproLedLight(LightEntity):
                  payload["d2"] = 1 # White Mode
                  payload["d3"] = d3_val
 
-        # Send command
         await self._send_mqtt_command(payload)
         self.async_write_ha_state()
 
@@ -308,7 +295,6 @@ class LeproLedLight(LightEntity):
 
     async def _send_mqtt_command(self, payload: dict):
         """Send command via MQTT"""
-        # B1 uses standard prp/set topic
         topic = f"le/{self._did}/prp/set"
         full_payload = {
             "id": random.randint(0, 1000000000),
@@ -322,24 +308,18 @@ class LeproLedLight(LightEntity):
             _LOGGER.error("Failed to send MQTT command: %s", e)
             
     async def async_added_to_hass(self):
-        """Run when entity is added to hass."""
         await super().async_added_to_hass()
         # Request initial state
         await self._request_state_update()
 
     async def _request_state_update(self):
-        """Request current state from device."""
         topic = f"le/{self._did}/prp/get"
-        # Request B1 specific DPs: d1, d2, d3, d5
+        # Request B1 specific DPs
         payload = json.dumps({"d": ["d1", "d2", "d3", "d5", "d30", "online"]})
         try:
             await self._mqtt_client.publish(topic, payload)
-            _LOGGER.debug("Requested state update for %s", self.name)
         except Exception as e:
             _LOGGER.error("Failed to request state update: %s", e)
-
-
-# Removed LeproSegmentLight class as B1 is not a segment light
 
 
 async def download_cert_file(session, url, path, headers):
@@ -355,10 +335,6 @@ def create_ssl_context(root_ca_path, client_cert_path, keyfile_path):
     """Create SSL context in a thread-safe manner."""
     context = ssl.create_default_context()
     context.load_verify_locations(cafile=root_ca_path)
-    
-    # NOTE: If using the manual key file (client_key.pem), use it.
-    # If the downloaded cert contains both, client_cert_path can be passed for both args.
-    # The original code passed keyfile_path explicitly, so we keep that.
     context.load_cert_chain(certfile=client_cert_path, keyfile=keyfile_path)
     return context
 
@@ -373,21 +349,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     
     # Generate persistent MAC if not exists
     if "persistent_mac" not in config_data:
-        # Create a hash of the account to generate a persistent MAC
         mac_hash = hashlib.md5(config_data["account"].encode()).hexdigest()
         persistent_mac = f"02:{mac_hash[0:2]}:{mac_hash[2:4]}:{mac_hash[4:6]}:{mac_hash[6:8]}:{mac_hash[8:10]}"
         config_data["persistent_mac"] = persistent_mac
-        
-        # Save updated config to the entry
         hass.config_entries.async_update_entry(entry, data=config_data)
         _LOGGER.info("Generated persistent MAC: %s", persistent_mac)
     
-    # Use the persistent MAC from config_data
     mac = config_data["persistent_mac"]
     language = config_data.get("language", "it")
     fcm_token = config_data.get("fcm_token", "dfi8s76mRTCxRxm3UtNp2z:APA91bHWMEWKT9CgNfGJ961jot2qgfYdWePbO5sQLovSFDI7U_H-ulJiqIAB2dpZUUrhzUNWR3OE_eM83i9IDLk1a5ZRwHDxMA_TnGqdpE8H-0_JML8pBFA")
     
-    # Update hass.data with the new config
     hass.data["lepro_led"][entry.entry_id] = config_data
     
     # ... rest of the setup code ...
@@ -399,7 +370,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     root_ca_path = os.path.join(cert_dir, f"{entry.entry_id}_root_ca.pem")
     client_cert_path = os.path.join(cert_dir, f"{entry.entry_id}_client_cert.pem")
     
-    # KEEPING THIS AS REQUESTED: Manual key file in the local directory
+    # Manual key file, exactly as you requested
     keyfile_path = os.path.join(os.path.dirname(__file__), "client_key.pem")
 
     async with aiohttp.ClientSession() as session:
@@ -482,7 +453,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
     # 6) Create SSL context in executor thread
     try:
-        # We pass keyfile_path here (the manual one) as requested
         ssl_context = await hass.async_add_executor_job(
             create_ssl_context, 
             root_ca_path, 
@@ -491,18 +461,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         )
     except Exception as e:
         _LOGGER.error("Failed to create SSL context: %s", e)
-        # Fallback: If manual key failed, try using client_cert as key (since download often has both)
-        try:
-            _LOGGER.info("Trying fallback to combined cert/key from download...")
-            ssl_context = await hass.async_add_executor_job(
-                create_ssl_context, 
-                root_ca_path, 
-                client_cert_path, 
-                client_cert_path
-            )
-        except Exception as e2:
-             _LOGGER.error("Fallback SSL context failed: %s", e2)
-             return
+        return
 
     # 7) Create MQTT client
     client_id_suffix = hashlib.sha256(entry.entry_id.encode()).hexdigest()[:32]
@@ -526,14 +485,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     entities = []
     device_entity_map = {}
     
+    # NOTE: Removed segments map because B1 is a single bulb.
+    
     for device in devices:
         entity = LeproLedLight(device, mqtt_client, entry.entry_id)
         entities.append(entity)
         device_entity_map[str(device['did'])] = entity
 
+        # Removed the S1-5 segment loop. This was likely causing errors
+        # because it tries to create segments for devices that might not support them.
     
     # 9) Message handler
-    # Update the message handler to process B1 specific fields
     async def handle_mqtt_message(message):
         try:
             topic = message.topic.value
@@ -555,23 +517,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             if message_type in ["rpt", "set", "getr"]:
                 data = payload.get('d', {})
                 
-                # Update basic state (d1 is On/Off)
+                # B1 PROTOCOL HANDLER
                 if 'd1' in data:
                     entity._is_on = bool(data['d1'])
                 
-                # Update mode (d2)
                 if 'd2' in data:
                     entity._mode = data['d2']
                 
-                # Update white brightness (d3)
                 if 'd3' in data:
                     entity._brightness = entity._map_device_brightness(data['d3'])
                 
-                # Update color (d5)
                 if 'd5' in data:
                     entity._parse_d5(data['d5'])
-                    
-                # update state
+
                 entity.async_write_ha_state()
 
                 _LOGGER.debug("Updated state for %s: on=%s", entity.name, entity._is_on)
