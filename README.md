@@ -1,83 +1,86 @@
-# Lepro LED (Home Assistant Custom Integration)
+# Lepro B1 Controller (Home Assistant Custom Integration)
 
-Monitor and control your **Lepro LED** devices from Home Assistant.  
-This custom integration logs in to **Lepro Cloud**, retrieves your lights and strips, and exposes them as controllable lights in HA.
+Monitor and control your **Lepro B1** devices from Home Assistant.
 
-[![Validate with HACS](https://img.shields.io/badge/HACS-validated-41BDF5)](https://hacs.xyz/)  
-[![hassfest](https://img.shields.io/badge/hassfest-passing-brightgreen)](https://developers.home-assistant.io/docs/creating_integration_manifest/)  
+This custom integration is a fork of [Sanji78/lepro_led](https://github.com/Sanji78/lepro_led), modified to **fully support Lepro B1 lights**. It logs in to the **Lepro Cloud**, retrieves your specific B1 devices, and exposes them as fully controllable lights in HA with improved stability.
+
+[![Validate with HACS](https://img.shields.io/badge/HACS-validated-41BDF5)](https://hacs.xyz/)
+[![hassfest](https://img.shields.io/badge/hassfest-passing-brightgreen)](https://developers.home-assistant.io/docs/creating_integration_manifest/)
 [![MIT License](https://img.shields.io/badge/license-MIT-informational)](LICENSE.md)
 
-> ⚠️ This is a third‑party project, not affiliated with Lepro.
+> ⚠️ **Note:** This is a third‑party project and is not affiliated with Lepro.
 
 ---
 
 ## ✨ Features
 
-- Login with your **Lepro** account (email + password).  
-- Automatically discovers all **Lepro lights and strips** in your account.  
-- Sensors for:
-  - Connection state and online/offline status
-  - Device model, firmware, and MAC address
-  - Brightness, color temperature, and RGB values
-- Turn lights **on/off**, set **brightness**, **color**, and **effects**.  
-- Automatic token renewal to maintain connectivity.
+- **Full B1 Compatibility:** Specifically patched to ensure Lepro B1 lights work correctly.
+- **Cloud Login:** Seamless integration using your existing **Lepro** account (email + password).
+- **Auto-Discovery:** Automatically finds lights and strips associated with your account.
+- **Device Control:**
+  - Turn lights **on/off**.
+  - Adjust **brightness** and **color temperature**.
+  - Set **RGB colors** and dynamic **effects**.
+- **Sensors & Status:**
+  - Real-time connection state (Online/Offline).
+  - Device info (Model, Firmware, MAC address).
+- **Stability:** Includes automatic token renewal to keep your devices connected.
 
 ---
 
 ## 🔧 Installation
 
-### Option A — HACS (recommended)
-1. Make sure you have [HACS](https://hacs.xyz/) installed in Home Assistant.
-2. In Home Assistant: **HACS → Integrations → ⋮ (three dots) → Custom repositories**.  
-   Add `https://github.com/Sanji78/lepro_led` as **Category: Integration**.
-3. Find **Lepro LED** in HACS and click **Download**.
-4. **Restart** Home Assistant.
+### Option A — HACS (Recommended)
+1. Ensure [HACS](https://hacs.xyz/) is installed in Home Assistant.
+2. Navigate to **HACS → Integrations**.
+3. Click the **⋮ (three dots)** in the top right corner and select **Custom repositories**.
+4. Add the following URL:
+   `https://github.com/haumlab/lepro_led`
+5. Select **Integration** as the category and click **Add**.
+6. Find **Lepro B1 Controller** in the list and click **Download**.
+7. **Restart** Home Assistant.
 
 ### Option B — Manual
-1. Copy the folder `custom_components/lepro_led` from this repository into your Home Assistant config folder:
-   - `<config>/custom_components/lepro_led`
-2. **Restart** Home Assistant.
+1. Download this repository.
+2. Copy the `custom_components/lepro_led` folder into your Home Assistant configuration directory:
+   - Path: `<config>/custom_components/lepro_led`
+3. **Restart** Home Assistant.
 
 ---
 
 ## ⚙️ Configuration
 
-1. Home Assistant → **Settings → Devices & services → Add Integration**.
-2. Search for **Lepro LED**.
-3. Enter your **Lepro email and password**.
-4. On success, entities will be created for each device.
-
-### Entities
-- **Lights**: control on/off, brightness, color temperature, RGB color, effects.
-- **Sensors**: connection status, device model, firmware, MAC, online/offline.
-- **Buttons**: (if applicable, e.g., factory reset or effect presets).
-
-> Notes:
-> - Credentials are stored in Home Assistant’s config entries.
-> - The integration communicates with Lepro’s cloud API (internet required).
+1. Go to **Settings → Devices & services**.
+2. Click **Add Integration** in the bottom right.
+3. Search for **Lepro LED**.
+4. Enter your **Lepro email and password**.
+5. Upon success, entities will be generated for your B1 devices.
 
 ---
 
-## 🧪 Supported versions
-- Home Assistant: **2024.8** or newer (earlier may work, untested).
+## 🧪 Supported Versions
+- **Home Assistant:** 2024.8 or newer.
 
 ---
 
 ## 🐞 Troubleshooting
-- Check **Settings → System → Logs** for messages under `custom_components.lepro_led`.
-- If login fails, verify email/password by signing into the official Lepro app.
-- If entities don’t update, ensure Home Assistant can reach the internet.
+- **Logs:** Check **Settings → System → Logs** and filter for `custom_components.lepro_led` to see detailed errors.
+- **Login Issues:** If authentication fails, verify your credentials by logging into the official Lepro mobile app first.
+- **Connectivity:** If entities become unavailable, ensure your Home Assistant instance has an active internet connection to communicate with the Lepro Cloud.
 
 ---
 
-## 🙌 Contributing
-PRs and issues are welcome. Please open an issue with logs if you hit a bug.
+## 🙌 Credits & Contributing
+This project is heavily based on the work of **Sanji78**. Huge thanks to them for the original integration foundation.
+
+Pull requests to improve B1 functionality further are welcome. Please open an issue if you encounter bugs.
 
 ---
 
-## ❤️ Donate
-If this project helps you, consider buying me a coffee:  
-**[PayPal](https://www.paypal.me/elenacapasso80)**.
+## ❤️ Donate (to the original creator)
+If this integration solved your B1 issues and you'd like to support the work, consider buying me a coffee:
+
+**[PayPal](https://www.paypal.me/elenacapasso80)**
 
 ..and yes... 😊 the paypal account is correct. Thank you so much!
 
@@ -85,4 +88,3 @@ If this project helps you, consider buying me a coffee:
 
 ## 📜 License
 [MIT](LICENSE.md)
-
