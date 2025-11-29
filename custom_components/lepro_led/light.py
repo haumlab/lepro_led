@@ -9,7 +9,7 @@ import os
 import hashlib
 import re
 import numpy as np
-import colorsys # Required for B1 Color conversion
+import colorsys 
 from .const import DOMAIN, LOGIN_URL, FAMILY_LIST_URL, USER_PROFILE_URL, DEVICE_LIST_URL, SWITCH_API_URL
 from aiomqtt import Client, MqttError
 import aiofiles
@@ -148,7 +148,6 @@ async def async_login(session, account, password, mac, language="it", fcm_token=
 
 
 class LeproLedLight(LightEntity):
-    # This class has been rewritten for the B1 Protocol (d1, d2, d3, d4, d5)
     
     def __init__(self, device, mqtt_client, entry_id):
         self._device = device
@@ -166,27 +165,19 @@ class LeproLedLight(LightEntity):
             "model": device.get("series", "Lepro B1"),
         }
         
-        # --- Internal State ---
-        # d1: 0=Off, 1=On
         self._is_on = bool(device.get("d1", 0))
-        # d2: 0=White, 1=Color, 2=Scene
         self._mode = device.get("d2", 0)
         
-        # d3: Brightness (10-1000)
         self._brightness = self._map_lepro_to_ha(device.get("d3", 1000))
         
-        # d4: Color Temp (0-1000, 0=2700K, 1000=6500K)
         self._color_temp_kelvin = self._map_d4_to_kelvin(device.get("d4", 0))
         
-        # d5: Color Hex String - stores Hue (0-360) and Saturation (0-100)
-        self._attr_hs_color = (0.0, 100.0)  # Default red at full saturation
+        self._attr_hs_color = (0.0, 100.0)  
         if "d5" in device:
             self._parse_d5(device["d5"])
             
-        # --- Capabilities ---
         self._attr_supported_color_modes = {ColorMode.HS, ColorMode.COLOR_TEMP}
         
-        # Determine current Color Mode for HA
         if self._mode == 1:
             self._attr_color_mode = ColorMode.HS
         else:
@@ -195,7 +186,6 @@ class LeproLedLight(LightEntity):
         self._attr_min_color_temp_kelvin = 2700
         self._attr_max_color_temp_kelvin = 6500
 
-    # --- Helpers ---
     def _map_ha_to_lepro(self, value):
         """Map 0-255 (HA) to 10-1000 (Lepro)"""
         if value is None: return 1000
@@ -220,14 +210,12 @@ class LeproLedLight(LightEntity):
         """Parse d5: HHHHSSSSBBBB (12 hex chars)"""
         try:
             if not hex_str or len(hex_str) < 12: return
-            h_int = int(hex_str[0:4], 16)  # Hue 0-360
-            s_int = int(hex_str[4:8], 16)  # Sat 0-1000
-            v_int = int(hex_str[8:12], 16) # Val/Brightness 0-1000
+            h_int = int(hex_str[0:4], 16)  
+            s_int = int(hex_str[4:8], 16)  
+            v_int = int(hex_str[8:12], 16) 
             
-            # Store as HS color (Home Assistant format: H=0-360, S=0-100)
             self._attr_hs_color = (float(h_int), s_int / 10.0)
             
-            # V component is brightness in color mode - use round() to avoid drift
             self._brightness = max(1, round(v_int * 255 / 1000))
             
             _LOGGER.debug("Parsed d5=%s -> HS=(%s, %s), brightness=%s", 
@@ -235,7 +223,6 @@ class LeproLedLight(LightEntity):
         except Exception as e:
             _LOGGER.error("Error parsing d5: %s", e)
 
-    # --- Properties ---
     @property
     def is_on(self):
         return self._is_on
@@ -254,19 +241,16 @@ class LeproLedLight(LightEntity):
         payload["d1"] = 1
         self._is_on = True
         
-        # Get brightness - use provided or current, ensure minimum of 10 (HA scale)
         if ATTR_BRIGHTNESS in kwargs:
             self._brightness = max(10, kwargs[ATTR_BRIGHTNESS])
         
-        # 1. Color (HS) Change Requested
         if ATTR_HS_COLOR in kwargs:
             hs = kwargs[ATTR_HS_COLOR]
             self._attr_hs_color = hs
             
-            # Convert HA HS (H=0-360, S=0-100) to Lepro d5 format
-            h_val = int(hs[0])  # Hue 0-360
-            s_val = int(hs[1] * 10)  # Saturation: HA 0-100 -> Lepro 0-1000
-            v_val = self._map_ha_to_lepro(self._brightness)  # Brightness as V
+            h_val = int(hs[0])  
+            s_val = int(hs[1] * 10) 
+            v_val = self._map_ha_to_lepro(self._brightness) 
             
             d5_hex = f"{h_val:04X}{s_val:04X}{v_val:04X}"
             
@@ -291,9 +275,8 @@ class LeproLedLight(LightEntity):
             self._attr_color_mode = ColorMode.COLOR_TEMP
             self._mode = 0
 
-        # 3. Only Brightness Changed (or just turn on)
         elif ATTR_BRIGHTNESS in kwargs:
-            if self._mode == 1:  # Color Mode - update d5 with new brightness
+            if self._mode == 1:  
                 hs = self._attr_hs_color
                 h_val = int(hs[0])
                 s_val = int(hs[1] * 10)
@@ -366,12 +349,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     account = config["account"]
     password = config["password"]
     
-    # Create a mutable copy of the config
     config_data = dict(config)
     
-    # Generate persistent MAC if not exists
     if "persistent_mac" not in config_data:
-        # Create a hash of the account to generate a persistent MAC
         mac_hash = hashlib.md5(config_data["account"].encode()).hexdigest()
         persistent_mac = f"02:{mac_hash[0:2]}:{mac_hash[2:4]}:{mac_hash[4:6]}:{mac_hash[6:8]}:{mac_hash[8:10]}"
         config_data["persistent_mac"] = persistent_mac
@@ -380,16 +360,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         hass.config_entries.async_update_entry(entry, data=config_data)
         _LOGGER.info("Generated persistent MAC: %s", persistent_mac)
     
-    # Use the persistent MAC from config_data
     mac = config_data["persistent_mac"]
     language = config_data.get("language", "it")
     fcm_token = config_data.get("fcm_token", "dfi8s76mRTCxRxm3UtNp2z:APA91bHWMEWKT9CgNfGJ961jot2qgfYdWePbO5sQLovSFDI7U_H-ulJiqIAB2dpZUUrhzUNWR3OE_eM83i9IDLk1a5ZRwHDxMA_TnGqdpE8H-0_JML8pBFA")
     
-    # Update hass.data with the new config
     hass.data["lepro_led"][entry.entry_id] = config_data
     
-    # ... rest of the setup code ...
-    # 1) Create certificate directory
     cert_dir = os.path.join(hass.config.config_dir, ".lepro_led")
     if not os.path.exists(cert_dir):
         await hass.async_add_executor_job(os.makedirs, cert_dir)
@@ -510,7 +486,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     entities = []
     device_entity_map = {}
     
-    # Cleaned up loop: NO SEGMENTS for B1
     for device in devices:
         entity = LeproLedLight(device, mqtt_client, entry.entry_id)
         entities.append(entity)
@@ -535,7 +510,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             if not entity:
                 return
                 
-            # Handle different message types
             if message_type in ["rpt", "set", "getr"]:
                 data = payload.get('d', {})
                 
@@ -549,12 +523,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
                 if 'd4' in data:
                     entity._color_temp_kelvin = entity._map_d4_to_kelvin(data['d4'])
                 
-                # Handle d5 first (contains brightness for color mode)
                 if 'd5' in data:
                     entity._parse_d5(data['d5'])
                 
-                # d3 is brightness for white mode - only update if NOT in color mode
-                # (in color mode, brightness comes from d5's V component)
                 if 'd3' in data and entity._mode != 1:
                     entity._brightness = entity._map_lepro_to_ha(data['d3'])
                 
