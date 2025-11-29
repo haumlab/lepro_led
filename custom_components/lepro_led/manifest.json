@@ -8,6 +8,6 @@
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/haumlab/lepro_led/issues",
   "loggers": ["custom_components.lepro_led"],
-  "requirements": ["aiohttp", "aiomqtt>=2.4.0", "aiofiles", "colorsys"],
+  "requirements": ["aiohttp", "aiomqtt>=2.4.0", "aiofiles"],
   "version": "1.0.0"
 }
