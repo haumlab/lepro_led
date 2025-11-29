@@ -4,10 +4,6 @@ Monitor and control your **Lepro B1** devices from Home Assistant.
 
 This custom integration is a fork of [Sanji78/lepro_led](https://github.com/Sanji78/lepro_led), modified to **fully support Lepro B1 lights**. It logs in to the **Lepro Cloud**, retrieves your specific B1 devices, and exposes them as fully controllable lights in HA with improved stability.
 
-[![Validate with HACS](https://img.shields.io/badge/HACS-validated-41BDF5)](https://hacs.xyz/)
-[![hassfest](https://img.shields.io/badge/hassfest-passing-brightgreen)](https://developers.home-assistant.io/docs/creating_integration_manifest/)
-[![MIT License](https://img.shields.io/badge/license-MIT-informational)](LICENSE.md)
-
 > ⚠️ **Note:** This is a third‑party project and is not affiliated with Lepro.
 
 ---
