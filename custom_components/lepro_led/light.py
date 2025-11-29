@@ -157,7 +157,7 @@ class LeproLedLight(LightEntity):
         self._entry_id = entry_id
         self._did = str(device["did"])
         self._attr_has_entity_name = True
-        self._attr_translation_key = "bulb"
+        self._attr_translation_key = "strip"
         self._attr_device_info = {
             "identifiers": {(DOMAIN, self._did)},
             "name": device["name"],
