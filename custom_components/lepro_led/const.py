@@ -1,4 +1,4 @@
-DOMAIN = "lepro_led"
+DOMAIN = "lepro_led_b1"
 
 LOGIN_URL = "https://api-eu-iot.lepro.com/user/login"
 FAMILY_LIST_URL = "https://api-eu-iot.lepro.com/family/list/timestamp/{timestamp}"
