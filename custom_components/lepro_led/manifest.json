@@ -1,12 +1,12 @@
 {
-  "domain": "lepro_led",
-  "name": "Lepro LED Strip",
-  "codeowners": ["@Sanji78"],
+  "domain": "lepro_led_b1",
+  "name": "Lepro B1 Controller",
+  "codeowners": ["@Sanji78", "huamlab"],
   "config_flow": true,
   "dependencies": [],
-  "documentation": "https://github.com/Sanji78/lepro_led",
+  "documentation": "https://github.com/haumlab/lepro_led",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/Sanji78/lepro_led/issues",
+  "issue_tracker": "https://github.com/haumlab/lepro_led/issues",
   "loggers": ["custom_components.lepro_led"],
   "requirements": ["aiohttp", "aiomqtt>=2.4.0", "aiofiles"],
   "version": "1.0.2"
