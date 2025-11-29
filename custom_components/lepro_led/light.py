@@ -345,7 +345,7 @@ def create_ssl_context(root_ca_path, client_cert_path, keyfile_path):
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback):
     """Set up Lepro LED lights from config entry."""
-    config = hass.data["lepro_led"][entry.entry_id]
+    config = hass.data["lepro_led_b1"][entry.entry_id]
     account = config["account"]
     password = config["password"]
     
@@ -364,9 +364,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     language = config_data.get("language", "it")
     fcm_token = config_data.get("fcm_token", "dfi8s76mRTCxRxm3UtNp2z:APA91bHWMEWKT9CgNfGJ961jot2qgfYdWePbO5sQLovSFDI7U_H-ulJiqIAB2dpZUUrhzUNWR3OE_eM83i9IDLk1a5ZRwHDxMA_TnGqdpE8H-0_JML8pBFA")
     
-    hass.data["lepro_led"][entry.entry_id] = config_data
+    hass.data["lepro_led_b1"][entry.entry_id] = config_data
     
-    cert_dir = os.path.join(hass.config.config_dir, ".lepro_led")
+    cert_dir = os.path.join(hass.config.config_dir, ".lepro_led_b1")
     if not os.path.exists(cert_dir):
         await hass.async_add_executor_job(os.makedirs, cert_dir)
 
