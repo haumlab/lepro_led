@@ -242,7 +242,7 @@ class LeproLedLight(LightEntity):
         self._is_on = True
         
         if ATTR_BRIGHTNESS in kwargs:
-            self._brightness = max(10, kwargs[ATTR_BRIGHTNESS])
+            self._brightness = max(1, kwargs[ATTR_BRIGHTNESS])
         
         if ATTR_HS_COLOR in kwargs:
             hs = kwargs[ATTR_HS_COLOR]
