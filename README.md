@@ -38,8 +38,8 @@ This custom integration is a fork of [Sanji78/lepro_led](https://github.com/Sanj
 
 ### Option B — Manual
 1. Download this repository.
-2. Copy the `custom_components/lepro_led` folder into your Home Assistant configuration directory:
-   - Path: `<config>/custom_components/lepro_led`
+2. Copy the `custom_components/lepro_led_b1` folder into your Home Assistant configuration directory:
+   - Path: `<config>/custom_components/lepro_led_b1`
 3. **Restart** Home Assistant.
 
 ---
@@ -60,7 +60,7 @@ This custom integration is a fork of [Sanji78/lepro_led](https://github.com/Sanj
 ---
 
 ## 🐞 Troubleshooting
-- **Logs:** Check **Settings → System → Logs** and filter for `custom_components.lepro_led` to see detailed errors.
+- **Logs:** Check **Settings → System → Logs** and filter for `custom_components.lepro_led_b1` to see detailed errors.
 - **Login Issues:** If authentication fails, verify your credentials by logging into the official Lepro mobile app first.
 - **Connectivity:** If entities become unavailable, ensure your Home Assistant instance has an active internet connection to communicate with the Lepro Cloud.
 
