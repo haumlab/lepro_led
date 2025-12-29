@@ -299,13 +299,30 @@ class LeproLedLight(LightEntity):
                 self._mode = 1
                 self._attr_color_mode = ColorMode.HS
                 
-                payload["changeType"] = effect_config["mode"]
-                payload["period"] = self._effect_speed
-                payload["segment"] = self._effect_colors
-                payload["direct"] = 0
+                group_id = f"{effect_config['mode']:02d}"
+                cycle_hex = f"{self._effect_speed:04X}"
+                accel_hex = "0000"
                 
-                _LOGGER.debug("Effect mode: %s, changeType=%s, period=%s, segment=%s", 
-                             effect_name, effect_config["mode"], self._effect_speed, self._effect_colors)
+                color_units = []
+                for i in range(self._effect_colors):
+                    mode = "01"
+                    if self._attr_hs_color:
+                        h = int(self._attr_hs_color[0])
+                        s = int(self._attr_hs_color[1] * 10)
+                    else:
+                        h = int((360 / self._effect_colors) * i)
+                        s = 1000
+                    v = self._map_ha_to_lepro(self._brightness)
+                    white_br = f"{0:04X}"
+                    white_temp = f"{0:04X}"
+                    
+                    color_unit = f"{mode}{h:04X}{s:04X}{v:04X}{white_br}{white_temp}"
+                    color_units.append(color_unit)
+                
+                d6_value = group_id + cycle_hex + accel_hex + "".join(color_units)
+                payload["d6"] = d6_value
+                
+                _LOGGER.debug("Effect mode: %s, d6=%s", effect_name, d6_value)
         
         elif ATTR_HS_COLOR in kwargs:
             self._attr_effect = None
