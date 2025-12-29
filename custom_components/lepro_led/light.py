@@ -19,8 +19,11 @@ from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_HS_COLOR,
     ATTR_COLOR_TEMP_KELVIN,
+    ATTR_EFFECT,
+    ATTR_EFFECT_LIST,
     LightEntity,
     ColorMode,
+    SUPPORT_EFFECT,
 )
 
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -28,6 +31,13 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
+
+B1_EFFECTS = {
+    "Gradient": {"mode": 1, "colors": (1, 8), "speed": (25, 150)},
+    "Flash": {"mode": 2, "colors": (1, 8), "speed": (25, 150)},
+    "Breathe": {"mode": 3, "colors": (1, 8), "speed": (25, 150)},
+    "Wave": {"mode": 4, "colors": (1, 8), "speed": (25, 150)},
+}
 
 class MQTTClientWrapper:
     def __init__(self, hass, host, port, ssl_context, client_id):
@@ -175,6 +185,11 @@ class LeproLedLight(LightEntity):
         self._attr_hs_color = (0.0, 100.0)  
         if "d5" in device:
             self._parse_d5(device["d5"])
+        
+        self._attr_effect_list = list(B1_EFFECTS.keys())
+        self._attr_effect = None
+        self._effect_speed = 75
+        self._effect_colors = 4
             
         self._attr_supported_color_modes = {ColorMode.HS, ColorMode.COLOR_TEMP}
         
@@ -185,6 +200,7 @@ class LeproLedLight(LightEntity):
             
         self._attr_min_color_temp_kelvin = 2700
         self._attr_max_color_temp_kelvin = 6500
+        self._attr_supported_features = SUPPORT_EFFECT
 
     def _map_ha_to_lepro(self, value):
         """Map 0-255 (HA) to 10-1000 (Lepro)"""
@@ -234,6 +250,28 @@ class LeproLedLight(LightEntity):
     @property
     def color_temp_kelvin(self):
         return self._color_temp_kelvin
+    
+    @property
+    def effect(self):
+        return self._attr_effect
+    
+    @property
+    def effect_list(self):
+        return self._attr_effect_list
+    
+    @property
+    def extra_state_attributes(self):
+        attrs = {
+            "effect_speed": self._effect_speed,
+            "effect_colors": self._effect_colors,
+            "effect_direction": 0,  # Direction is available for future use
+            "effect_speed_range": "25-150ms",
+            "effect_colors_range": "1-8 colors",
+        }
+        if self._attr_effect:
+            effect_config = B1_EFFECTS.get(self._attr_effect, {})
+            attrs["current_effect_mode"] = effect_config.get("mode")
+        return attrs
 
     # --- Control ---
     async def async_turn_on(self, **kwargs):
@@ -244,7 +282,33 @@ class LeproLedLight(LightEntity):
         if ATTR_BRIGHTNESS in kwargs:
             self._brightness = max(1, kwargs[ATTR_BRIGHTNESS])
         
-        if ATTR_HS_COLOR in kwargs:
+        # Update effect parameters if provided
+        if "effect_speed" in kwargs:
+            self._effect_speed = max(25, min(150, int(kwargs["effect_speed"])))
+        
+        if "effect_colors" in kwargs:
+            self._effect_colors = max(1, min(8, int(kwargs["effect_colors"])))
+        
+        if ATTR_EFFECT in kwargs:
+            effect_name = kwargs[ATTR_EFFECT]
+            if effect_name in B1_EFFECTS:
+                self._attr_effect = effect_name
+                effect_config = B1_EFFECTS[effect_name]
+                
+                payload["d2"] = 1
+                self._mode = 1
+                self._attr_color_mode = ColorMode.HS
+                
+                payload["changeType"] = effect_config["mode"]
+                payload["period"] = self._effect_speed
+                payload["segment"] = self._effect_colors
+                payload["direct"] = 0
+                
+                _LOGGER.debug("Effect mode: %s, changeType=%s, period=%s, segment=%s", 
+                             effect_name, effect_config["mode"], self._effect_speed, self._effect_colors)
+        
+        elif ATTR_HS_COLOR in kwargs:
+            self._attr_effect = None
             hs = kwargs[ATTR_HS_COLOR]
             self._attr_hs_color = hs
             
@@ -261,8 +325,8 @@ class LeproLedLight(LightEntity):
             
             _LOGGER.debug("Color change: HS=%s, brightness=%s, d5=%s", hs, self._brightness, d5_hex)
 
-        # 2. Color Temp Change Requested
         elif ATTR_COLOR_TEMP_KELVIN in kwargs:
+            self._attr_effect = None
             kelvin = kwargs[ATTR_COLOR_TEMP_KELVIN]
             self._color_temp_kelvin = kelvin
             

@@ -15,3 +15,4 @@ build/
 # Home Assistant
 .storage/
 home-assistant.log
+lepro

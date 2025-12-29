@@ -16,7 +16,8 @@ This custom integration is a fork of [Sanji78/lepro_led](https://github.com/Sanj
 - **Device Control:**
   - Turn lights **on/off**.
   - Adjust **brightness** and **color temperature**.
-  - Set **RGB colors** and dynamic **effects**.
+  - Set **RGB colors** and dynamic **effects** (Gradient, Flash, Breathe, Wave).
+  - **NEW:** Full effect support with all 4 B1 effect modes from the official app.
 - **Sensors & Status:**
   - Real-time connection state (Online/Offline).
   - Device info (Model, Firmware, MAC address).
