@@ -23,6 +23,7 @@ from homeassistant.components.light import (
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady
 
 from .const import DOMAIN
 from .lepro_api import LeproAPI, create_ssl_context
@@ -380,8 +381,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
     async with aiohttp.ClientSession() as session:
         if not await api.login(session):
-            _LOGGER.error("Failed to login")
-            return
+            raise ConfigEntryNotReady("Failed to login")
 
         user_data = await api.get_user_profile(session)
         if not user_data:
