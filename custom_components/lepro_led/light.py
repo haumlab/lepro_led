@@ -1,16 +1,15 @@
 import asyncio
-import aiohttp
 import logging
 import time
 import json
 import random
-import ssl
 import os
 import hashlib
 from .const import DOMAIN, LOGIN_URL, FAMILY_LIST_URL, USER_PROFILE_URL, DEVICE_LIST_URL, SWITCH_API_URL
 from aiomqtt import Client, MqttError
 import aiofiles
 
+from homeassistant.core import callback
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_HS_COLOR,
@@ -18,11 +17,13 @@ from homeassistant.components.light import (
     LightEntity,
     ColorMode,
 )
-
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
+from .const import DOMAIN
+from .lepro_api import LeproAPI, create_ssl_context
+from .lepro_mqtt import LeproMQTTClient
 _LOGGER = logging.getLogger(__name__)
 
 class MQTTClientWrapper:
@@ -141,6 +142,7 @@ async def async_login(session, account, password, mac, language="it", fcm_token=
         token = data.get("data", {}).get("token")
         return token
 
+_LOGGER = logging.getLogger(__name__)
 
 class LeproLedLight(LightEntity):
     
@@ -196,7 +198,6 @@ class LeproLedLight(LightEntity):
     @staticmethod
     def _map_kelvin_to_d4(kelvin):
         """Map Kelvin (2700-6500) to d4 (0-1000)"""
-        # 2700K = 0, 6500K = 1000
         percentage = (kelvin - 2700) / (6500 - 2700)
         return max(0, min(1000, int(percentage * 1000)))
 
@@ -216,9 +217,6 @@ class LeproLedLight(LightEntity):
             self._attr_hs_color = (float(h_int), s_int / 10.0)
             
             self._brightness = max(1, round(v_int * 255 / 1000))
-            
-            _LOGGER.debug("Parsed d5=%s -> HS=(%s, %s), brightness=%s", 
-                         hex_str, h_int, s_int/10.0, self._brightness)
         except Exception as e:
             _LOGGER.error("Error parsing d5: %s", e)
 
@@ -234,7 +232,6 @@ class LeproLedLight(LightEntity):
     def color_temp_kelvin(self):
         return self._color_temp_kelvin
 
-    # --- Control ---
     async def async_turn_on(self, **kwargs):
         payload = {}
         payload["d1"] = 1
@@ -258,8 +255,6 @@ class LeproLedLight(LightEntity):
             self._attr_color_mode = ColorMode.HS
             self._mode = 1
             
-            _LOGGER.debug("Color change: HS=%s, brightness=%s, d5=%s", hs, self._brightness, d5_hex)
-
         elif ATTR_COLOR_TEMP_KELVIN in kwargs:
             kelvin = kwargs[ATTR_COLOR_TEMP_KELVIN]
             self._color_temp_kelvin = kelvin
@@ -281,7 +276,6 @@ class LeproLedLight(LightEntity):
                 v_val = self._map_ha_to_lepro(self._brightness)
                 d5_hex = f"{h_val:04X}{s_val:04X}{v_val:04X}"
                 payload["d5"] = d5_hex
-                _LOGGER.debug("Brightness change in color mode: d5=%s", d5_hex)
             else:  # White Mode
                 payload["d3"] = self._map_ha_to_lepro(self._brightness)
 
@@ -310,39 +304,42 @@ class LeproLedLight(LightEntity):
     async def async_added_to_hass(self):
         """Run when entity is added to hass."""
         await super().async_added_to_hass()
-        # Request initial state
         await self._request_state_update()
 
     async def _request_state_update(self):
         """Request current state from device."""
         topic = f"le/{self._did}/prp/get"
-        # B1 payload for get
         payload = json.dumps({"d": ["d1", "d2", "d3", "d4", "d5", "online"]})
         try:
             await self._mqtt_client.publish(topic, payload)
-            _LOGGER.debug("Requested state update for %s", self.name)
         except Exception as e:
             _LOGGER.error("Failed to request state update: %s", e)
 
+    def process_update(self, data):
+        """Process MQTT update."""
+        if 'd1' in data:
+            self._is_on = bool(data['d1'])
 
-async def download_cert_file(session, url, path, headers):
-    """Download a certificate file asynchronously."""
-    async with session.get(url, headers=headers) as resp:
-        if resp.status != 200:
-            raise Exception(f"Failed to download {url}: {resp.status}")
-        data = await resp.read()
-        async with aiofiles.open(path, 'wb') as f:
-            await f.write(data)
+        if 'd2' in data:
+            self._mode = data['d2']
 
-def create_ssl_context(root_ca_path, client_cert_path, keyfile_path):
-    """Create SSL context in a thread-safe manner."""
-    context = ssl.create_default_context()
-    context.load_verify_locations(cafile=root_ca_path)
-    context.load_cert_chain(certfile=client_cert_path, keyfile=keyfile_path)
-    return context
+        if 'd4' in data:
+            self._color_temp_kelvin = self._map_d4_to_kelvin(data['d4'])
+
+        if 'd5' in data:
+            self._parse_d5(data['d5'])
+
+        if 'd3' in data and self._mode != 1:
+            self._brightness = self._map_lepro_to_ha(data['d3'])
+
+        if self._mode == 1:
+            self._attr_color_mode = ColorMode.HS
+        else:
+            self._attr_color_mode = ColorMode.COLOR_TEMP
+
+        self.async_write_ha_state()
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback):
-    """Set up Lepro LED lights from config entry."""
     config = hass.data["lepro_led_b1"][entry.entry_id]
     account = config["account"]
     password = config["password"]
@@ -376,93 +373,58 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     
     hass.data["lepro_led_b1"][entry.entry_id] = config_data
     
-    cert_dir = os.path.join(hass.config.config_dir, ".lepro_led_b1")
-    if not os.path.exists(cert_dir):
-        await hass.async_add_executor_job(os.makedirs, cert_dir)
-
-    root_ca_path = os.path.join(cert_dir, f"{entry.entry_id}_root_ca.pem")
-    client_cert_path = os.path.join(cert_dir, f"{entry.entry_id}_client_cert.pem")
-    keyfile_path = os.path.join(os.path.dirname(__file__), "client_key.pem")
+    api = LeproAPI(account, password, mac, language, fcm_token)
 
     async with aiohttp.ClientSession() as session:
-        # 1) Login and get bearer token
-        bearer_token = await async_login(session, account, password, mac, language, fcm_token)
-        if bearer_token is None:
-            _LOGGER.error("Failed to login to Lepro API")
+        if not await api.login(session):
+            _LOGGER.error("Failed to login")
             return
 
-        headers = {
-            "Authorization": f"Bearer {bearer_token}",
-            "Accept-Encoding": "gzip",
-            "App-Version": "1.0.9.202",
-            "Device-Model": "custom_integration",
-            "Device-System": "custom",
-            "GMT": "+0",
-            "Host": "api-eu-iot.lepro.com",
-            "Language": language,
-            "Platform": "2",
-            "Screen-Size": "1536*2048",
-            "Slanguage": language,
-            "User-Agent": "LE/1.0.9.202 (Custom Integration)",
-        }
-
-        # 2) Get user profile to find uid and MQTT info
-        user_url = USER_PROFILE_URL
-        timestamp = str(int(time.time()))
-        headers["Timestamp"] = timestamp
-        
-        async with session.get(user_url, headers=headers) as resp:
-            if resp.status != 200:
-                _LOGGER.error("Failed to get user profile from Lepro API")
-                return
-            user_data = await resp.json()
+        user_data = await api.get_user_profile(session)
+        if not user_data:
+            return
 
         try:
             uid = user_data["data"]["uid"]
             mqtt_info = user_data["data"]["mqtt"]
         except KeyError as e:
-            _LOGGER.error("Failed to parse user profile response: %s", e)
+            _LOGGER.error("Invalid user profile data: %s", e)
             return
 
-        # 3) Download certificates within the same session
+        cert_dir = os.path.join(hass.config.config_dir, ".lepro_led_b1")
+        if not os.path.exists(cert_dir):
+            await hass.async_add_executor_job(os.makedirs, cert_dir)
+
+        root_ca_path = os.path.join(cert_dir, f"{entry.entry_id}_root_ca.pem")
+        client_cert_path = os.path.join(cert_dir, f"{entry.entry_id}_client_cert.pem")
+        keyfile_path = os.path.join(os.path.dirname(__file__), "client_key.pem")
+
         try:
-            await download_cert_file(session, mqtt_info["root"], root_ca_path, headers)
-            await download_cert_file(session, mqtt_info["cert"], client_cert_path, headers)
+            await api.download_certificates(session, mqtt_info, root_ca_path, client_cert_path)
         except Exception as e:
-            _LOGGER.error("Certificate download failed: %s", e)
-            return
+             _LOGGER.error("Failed to download certificates: %s", e)
+             return
 
-        # 4) Get family list to find fid
-        family_url = FAMILY_LIST_URL.format(timestamp=timestamp)
-        async with session.get(family_url, headers=headers) as resp:
-            if resp.status != 200:
-                _LOGGER.error("Failed to get family list from Lepro API")
-                return
-            family_data = await resp.json()
+        family_data = await api.get_family_list(session)
+        if not family_data:
+            return
 
         try:
             fid = family_data["data"]["list"][0]["fid"]
-        except (KeyError, IndexError) as e:
-            _LOGGER.error("Failed to parse fid from family list response: %s", e)
+        except (KeyError, IndexError):
+            _LOGGER.error("No family found")
             return
 
-        # 5) Get device list by fid
-        timestamp = str(int(time.time()))
-        device_url = DEVICE_LIST_URL.format(fid=fid, timestamp=timestamp)
-        headers["Timestamp"] = timestamp
-
-        async with session.get(device_url, headers=headers) as resp:
-            if resp.status != 200:
-                _LOGGER.error("Failed to get device list from Lepro API")
-                return
-            device_data = await resp.json()
+        device_data = await api.get_device_list(session, fid)
+        if not device_data:
+            return
 
         devices = device_data.get("data", {}).get("list", [])
         if not devices:
-            _LOGGER.warning("No devices found in Lepro account")
+            _LOGGER.warning("No devices found")
             return
 
-    # 6) Create SSL context in executor thread
+    # SSL Context
     try:
         ssl_context = await hass.async_add_executor_job(
             create_ssl_context, 
@@ -474,113 +436,56 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         _LOGGER.error("Failed to create SSL context: %s", e)
         return
 
-    # 7) Create MQTT client
+    # MQTT Client
     client_id_suffix = hashlib.sha256(entry.entry_id.encode()).hexdigest()[:32]
     client_id = f"lepro-app-{client_id_suffix}"
     
-    mqtt_client = MQTTClientWrapper(
-        hass,
+    mqtt_client = LeproMQTTClient(
         host=mqtt_info["host"],
         port=int(mqtt_info["port"]),
         ssl_context=ssl_context,
         client_id=client_id
     )
     
-    try:
-        await mqtt_client.connect()
-    except Exception as e:
-        _LOGGER.error("MQTT connection failed: %s", e)
-        return
-    
-    # 8) Create entities
-    entities = []
     device_entity_map = {}
+    entities = []
     
     for device in devices:
         entity = LeproLedLight(device, mqtt_client, entry.entry_id)
         entities.append(entity)
         device_entity_map[str(device['did'])] = entity
-    
-    # 9) Message handler
-    # Update the message handler to process all relevant fields
+
     async def handle_mqtt_message(message):
         try:
             topic = message.topic.value
             payload = json.loads(message.payload.decode())
-            _LOGGER.debug("Received MQTT message: %s - %s", topic, payload)
+            _LOGGER.debug("MQTT: %s - %s", topic, payload)
             
             parts = topic.split('/')
             if len(parts) < 4 or parts[0] != "le":
                 return
-                
+
             did = parts[1]
-            message_type = parts[3]
             entity = device_entity_map.get(did)
-            
-            if not entity:
-                return
+            if entity and parts[3] in ["rpt", "set", "getr"]:
+                entity.process_update(payload.get('d', {}))
                 
-            if message_type in ["rpt", "set", "getr"]:
-                data = payload.get('d', {})
-                
-                # B1 Protocol Handling
-                if 'd1' in data:
-                    entity._is_on = bool(data['d1'])
-                
-                if 'd2' in data:
-                    entity._mode = data['d2']
-                
-                if 'd4' in data:
-                    entity._color_temp_kelvin = entity._map_d4_to_kelvin(data['d4'])
-                
-                if 'd5' in data:
-                    entity._parse_d5(data['d5'])
-                
-                if 'd3' in data and entity._mode != 1:
-                    entity._brightness = entity._map_lepro_to_ha(data['d3'])
-                
-                # Update HA State
-                if entity._mode == 1:
-                    entity._attr_color_mode = ColorMode.HS
-                else:
-                    entity._attr_color_mode = ColorMode.COLOR_TEMP
-
-                entity.async_write_ha_state()
-
-                _LOGGER.debug("Updated state for %s: on=%s, mode=%s, brightness=%s", entity.name, entity._is_on, entity._mode, entity._brightness)
-                    
         except Exception as e:
-            _LOGGER.error("Error processing MQTT message: %s", e)
-   
+            _LOGGER.error("Error processing message: %s", e)
+
     mqtt_client.set_message_callback(handle_mqtt_message)
     
-    # 10) Subscribe and start
+    await mqtt_client.connect()
     await mqtt_client.subscribe(f"le/{client_id_suffix}/act/app/exe")
     for did in device_entity_map.keys():
         await mqtt_client.subscribe(f"le/{did}/prp/#")
-    
-    # Store for cleanup
-    if DOMAIN not in hass.data:
-        hass.data[DOMAIN] = {}
+
     hass.data[DOMAIN][entry.entry_id] = {
         'mqtt_client': mqtt_client,
         'entities': entities
     }
     
-    async_add_entities(entities)
-
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload MQTT client and entities."""
-    data = hass.data[DOMAIN].get(entry.entry_id)
-    if not data:
-        return True
-        
-    # Disconnect MQTT client
-    await data['mqtt_client'].disconnect()
+    # Register cleanup
+    entry.async_on_unload(lambda: hass.async_create_task(mqtt_client.disconnect()))
     
-    # Remove entities
-    for entity in data['entities']:
-        await entity.async_remove()
-        
-    hass.data[DOMAIN].pop(entry.entry_id)
-    return True
+    async_add_entities(entities)
