@@ -5,10 +5,9 @@ import json
 import random
 import os
 import hashlib
-import re
-import numpy as np
-import colorsys 
-import aiohttp
+from .const import DOMAIN, LOGIN_URL, FAMILY_LIST_URL, USER_PROFILE_URL, DEVICE_LIST_URL, SWITCH_API_URL
+from aiomqtt import Client, MqttError
+import aiofiles
 
 from homeassistant.core import callback
 from homeassistant.components.light import (
@@ -25,6 +24,123 @@ from homeassistant.core import HomeAssistant
 from .const import DOMAIN
 from .lepro_api import LeproAPI, create_ssl_context
 from .lepro_mqtt import LeproMQTTClient
+_LOGGER = logging.getLogger(__name__)
+
+class MQTTClientWrapper:
+    def __init__(self, hass, host, port, ssl_context, client_id):
+        self.hass = hass
+        self.host = host
+        self.port = port
+        self.ssl_context = ssl_context
+        self.client_id = client_id
+        self.client = None
+        self._message_callback = None
+        self._loop_task = None
+        self._pending_subscriptions = []
+        self._pending_messages = []
+
+    async def _connect_and_run(self):
+        try:
+            async with Client(
+                hostname=self.host,
+                port=self.port,
+                identifier=self.client_id,
+                tls_context=self.ssl_context,
+                clean_session=True
+            ) as client:
+                self.client = client
+                
+                # Process pending subscriptions
+                for topic in self._pending_subscriptions:
+                    await client.subscribe(topic)
+                self._pending_subscriptions = []
+                
+                # Process pending messages
+                for topic, payload in self._pending_messages:
+                    await client.publish(topic, payload)
+                self._pending_messages = []
+                
+                # Start message loop
+                async for message in client.messages:
+                    if self._message_callback:
+                        await self._message_callback(message)
+        except MqttError as e:
+            _LOGGER.error("MQTT error: %s", e)
+        finally:
+            self.client = None
+
+    async def connect(self):
+        if self._loop_task and not self._loop_task.done():
+            return
+            
+        self._pending_subscriptions = []
+        self._pending_messages = []
+        self._loop_task = asyncio.create_task(self._connect_and_run())
+
+    async def subscribe(self, topic):
+        if self.client:
+            await self.client.subscribe(topic)
+        else:
+            self._pending_subscriptions.append(topic)
+            if not self._loop_task or self._loop_task.done():
+                await self.connect()
+
+    async def publish(self, topic, payload):
+        if self.client:
+            await self.client.publish(topic, payload)
+        else:
+            self._pending_messages.append((topic, payload))
+            if not self._loop_task or self._loop_task.done():
+                await self.connect()
+
+    def set_message_callback(self, callback):
+        self._message_callback = callback
+
+    async def disconnect(self):
+        if self._loop_task:
+            self._loop_task.cancel()
+            try:
+                await self._loop_task
+            except asyncio.CancelledError:
+                pass
+
+async def async_login(session, account, password, mac, language="it", fcm_token=""):
+    """Perform login and return bearer token."""
+    timestamp = str(int(time.time()))
+    payload = {
+        "platform": "2",
+        "account": account,
+        "password": password,
+        "mac": mac,
+        "timestamp": timestamp,
+        "language": language,
+        "fcmToken": fcm_token,
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "App-Version": "1.0.9.202",
+        "Device-Model": "custom_integration",
+        "Device-System": "custom",
+        "GMT": "+0",
+        "Host": "api-eu-iot.lepro.com",
+        "Language": language,
+        "Platform": "2",
+        "Screen-Size": "1536*2048",
+        "Slanguage": language,
+        "Timestamp": timestamp,
+        "User-Agent": "LE/1.0.9.202 (Custom Integration)",
+    }
+
+    async with session.post(LOGIN_URL, json=payload, headers=headers) as resp:
+        if resp.status != 200:
+            _LOGGER.error("Login failed with status %s", resp.status)
+            return None
+        data = await resp.json()
+        if data.get("code") != 0:
+            _LOGGER.error("Login failed with message: %s", data.get("msg"))
+            return None
+        token = data.get("data", {}).get("token")
+        return token
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -67,22 +183,26 @@ class LeproLedLight(LightEntity):
         self._attr_min_color_temp_kelvin = 2700
         self._attr_max_color_temp_kelvin = 6500
 
-    def _map_ha_to_lepro(self, value):
+    @staticmethod
+    def _map_ha_to_lepro(value):
         """Map 0-255 (HA) to 10-1000 (Lepro)"""
         if value is None: return 1000
         return max(10, round(value * 1000 / 255))
 
-    def _map_lepro_to_ha(self, value):
+    @staticmethod
+    def _map_lepro_to_ha(value):
         """Map 10-1000 (Lepro) to 0-255 (HA)"""
         if value is None: return 255
         return round(value * 255 / 1000)
 
-    def _map_kelvin_to_d4(self, kelvin):
+    @staticmethod
+    def _map_kelvin_to_d4(kelvin):
         """Map Kelvin (2700-6500) to d4 (0-1000)"""
         percentage = (kelvin - 2700) / (6500 - 2700)
         return max(0, min(1000, int(percentage * 1000)))
 
-    def _map_d4_to_kelvin(self, d4):
+    @staticmethod
+    def _map_d4_to_kelvin(d4):
         """Map d4 (0-1000) to Kelvin (2700-6500)"""
         return int(2700 + (d4 / 1000.0) * (6500 - 2700))
 
@@ -225,16 +345,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     password = config["password"]
     
     config_data = dict(config)
-    
+    updated = False
+
     if "persistent_mac" not in config_data:
         mac_hash = hashlib.md5(config_data["account"].encode()).hexdigest()
         persistent_mac = f"02:{mac_hash[0:2]}:{mac_hash[2:4]}:{mac_hash[4:6]}:{mac_hash[6:8]}:{mac_hash[8:10]}"
         config_data["persistent_mac"] = persistent_mac
+        updated = True
+        _LOGGER.info("Generated persistent MAC: %s", persistent_mac)
+
+    if "fcm_token" not in config_data:
+        # Generate a unique random FCM token
+        alphabet = string.ascii_letters + string.digits
+        prefix = "".join(secrets.choice(alphabet) for _ in range(22))
+        suffix = "".join(secrets.choice(alphabet) for _ in range(134))
+        config_data["fcm_token"] = f"{prefix}:APA91b{suffix}"
+        updated = True
+        _LOGGER.info("Generated unique FCM token")
+
+    if updated:
+        # Save updated config to the entry
         hass.config_entries.async_update_entry(entry, data=config_data)
     
     mac = config_data["persistent_mac"]
     language = config_data.get("language", "it")
-    fcm_token = config_data.get("fcm_token", "dfi8s76mRTCxRxm3UtNp2z:APA91bHWMEWKT9CgNfGJ961jot2qgfYdWePbO5sQLovSFDI7U_H-ulJiqIAB2dpZUUrhzUNWR3OE_eM83i9IDLk1a5ZRwHDxMA_TnGqdpE8H-0_JML8pBFA")
+    fcm_token = config_data.get("fcm_token", "")
     
     hass.data["lepro_led_b1"][entry.entry_id] = config_data
     
