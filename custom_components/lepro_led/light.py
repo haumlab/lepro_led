@@ -7,13 +7,9 @@ import random
 import ssl
 import os
 import hashlib
-import re
-import numpy as np
-import colorsys 
 from .const import DOMAIN, LOGIN_URL, FAMILY_LIST_URL, USER_PROFILE_URL, DEVICE_LIST_URL, SWITCH_API_URL
 from aiomqtt import Client, MqttError
 import aiofiles
-from homeassistant.core import callback
 
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
@@ -135,7 +131,6 @@ async def async_login(session, account, password, mac, language="it", fcm_token=
     }
 
     async with session.post(LOGIN_URL, json=payload, headers=headers) as resp:
-        import json
         if resp.status != 200:
             _LOGGER.error("Login failed with status %s", resp.status)
             return None
