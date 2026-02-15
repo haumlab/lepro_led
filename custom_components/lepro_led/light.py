@@ -186,23 +186,27 @@ class LeproLedLight(LightEntity):
         self._attr_min_color_temp_kelvin = 2700
         self._attr_max_color_temp_kelvin = 6500
 
-    def _map_ha_to_lepro(self, value):
+    @staticmethod
+    def _map_ha_to_lepro(value):
         """Map 0-255 (HA) to 10-1000 (Lepro)"""
         if value is None: return 1000
         return max(10, round(value * 1000 / 255))
 
-    def _map_lepro_to_ha(self, value):
+    @staticmethod
+    def _map_lepro_to_ha(value):
         """Map 10-1000 (Lepro) to 0-255 (HA)"""
         if value is None: return 255
         return round(value * 255 / 1000)
 
-    def _map_kelvin_to_d4(self, kelvin):
+    @staticmethod
+    def _map_kelvin_to_d4(kelvin):
         """Map Kelvin (2700-6500) to d4 (0-1000)"""
         # 2700K = 0, 6500K = 1000
         percentage = (kelvin - 2700) / (6500 - 2700)
         return max(0, min(1000, int(percentage * 1000)))
 
-    def _map_d4_to_kelvin(self, d4):
+    @staticmethod
+    def _map_d4_to_kelvin(d4):
         """Map d4 (0-1000) to Kelvin (2700-6500)"""
         return int(2700 + (d4 / 1000.0) * (6500 - 2700))
 
