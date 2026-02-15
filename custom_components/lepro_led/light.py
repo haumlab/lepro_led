@@ -8,6 +8,8 @@ import ssl
 import os
 import hashlib
 import re
+import secrets
+import string
 import numpy as np
 import colorsys 
 from .const import DOMAIN, LOGIN_URL, FAMILY_LIST_URL, USER_PROFILE_URL, DEVICE_LIST_URL, SWITCH_API_URL
@@ -349,19 +351,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     password = config["password"]
     
     config_data = dict(config)
-    
+    updated = False
+
     if "persistent_mac" not in config_data:
         mac_hash = hashlib.md5(config_data["account"].encode()).hexdigest()
         persistent_mac = f"02:{mac_hash[0:2]}:{mac_hash[2:4]}:{mac_hash[4:6]}:{mac_hash[6:8]}:{mac_hash[8:10]}"
         config_data["persistent_mac"] = persistent_mac
-        
+        updated = True
+        _LOGGER.info("Generated persistent MAC: %s", persistent_mac)
+
+    if "fcm_token" not in config_data:
+        # Generate a unique random FCM token
+        alphabet = string.ascii_letters + string.digits
+        prefix = "".join(secrets.choice(alphabet) for _ in range(22))
+        suffix = "".join(secrets.choice(alphabet) for _ in range(134))
+        config_data["fcm_token"] = f"{prefix}:APA91b{suffix}"
+        updated = True
+        _LOGGER.info("Generated unique FCM token")
+
+    if updated:
         # Save updated config to the entry
         hass.config_entries.async_update_entry(entry, data=config_data)
-        _LOGGER.info("Generated persistent MAC: %s", persistent_mac)
     
     mac = config_data["persistent_mac"]
     language = config_data.get("language", "it")
-    fcm_token = config_data.get("fcm_token", "dfi8s76mRTCxRxm3UtNp2z:APA91bHWMEWKT9CgNfGJ961jot2qgfYdWePbO5sQLovSFDI7U_H-ulJiqIAB2dpZUUrhzUNWR3OE_eM83i9IDLk1a5ZRwHDxMA_TnGqdpE8H-0_JML8pBFA")
+    fcm_token = config_data.get("fcm_token", "")
     
     hass.data["lepro_led_b1"][entry.entry_id] = config_data
     
